@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+aiohttp
+trafilatura
+PyYAML
+faiss-cpu
+sentence-transformers
+google-generativeai
+pydantic
+python-multipart
+jinja2
+python-dotenv
+tiktoken
+numpy
+asyncio
+beautifulsoup4
+pydantic-settings
