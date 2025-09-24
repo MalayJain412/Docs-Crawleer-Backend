@@ -394,7 +394,42 @@ Enable debug logging:
 LOG_LEVEL=DEBUG
 ```
 
-## 📝 License
+## � Deployment
+
+### Render Deployment
+
+This application is configured for deployment on Render with both Docker and native Python support.
+
+#### Files Created for Deployment:
+- `Procfile` - Process definition for native Python deployment
+- `Dockerfile` - Container configuration for Docker deployment
+- `gunicorn.conf.py` - Gunicorn configuration for production WSGI server
+- Updated `requirements.txt` - Added gunicorn dependency
+
+#### Deployment Steps:
+
+1. **Connect Repository**: Connect your GitHub repository to Render
+
+2. **Choose Deployment Method**:
+   - **Docker**: Select "Docker" as runtime, uses `Dockerfile`
+   - **Native Python**: Select "Python", uses `Procfile` and `requirements.txt`
+
+3. **Environment Variables**: Set the following in Render dashboard:
+   ```
+   GEMINI_API_KEY=your_gemini_api_key
+   PYTHONPATH=/app/src
+   LOG_LEVEL=INFO
+   ```
+
+4. **Build & Deploy**: Render will automatically build and deploy your application
+
+#### Production Configuration:
+- Uses Gunicorn with Uvicorn workers for optimal FastAPI performance
+- Automatically scales workers based on CPU cores
+- Configurable via `gunicorn.conf.py`
+- Supports Render's dynamic PORT assignment
+
+## �📝 License
 
 [Add your license information here]
 
