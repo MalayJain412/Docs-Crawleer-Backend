@@ -7,9 +7,9 @@ on:
     branches: [ master, main ]
 
 env:
-  # Azure Container Registry created earlier
-  ACR_NAME: "docscrawlacr"
-  # Resource group where Container App lives
+  # Azure Container Registry
+  ACR_NAME: "intelligentdocsacr"
+  # Resource group where ACR and Container App live
   RESOURCE_GROUP: "intelligent-docs-rg"
   # Container App name to update
   CONTAINER_APP_NAME: "intelligent-docs-backend"
