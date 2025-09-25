@@ -1,0 +1,67 @@
+name: Build and Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+env:
+  # Azure Container Registry created earlier
+  ACR_NAME: "docscrawlacr"
+  # Resource group where Container App lives
+  RESOURCE_GROUP: "intelligent-docs-rg"
+  # Container App name to update
+  CONTAINER_APP_NAME: "intelligent-docs-backend"
+  # Image name (repository) inside ACR
+  IMAGE_NAME: "intelligent-docs-backend"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Log in to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Log in to Azure Container Registry
+      run: az acr login --name ${{ env.ACR_NAME }}
+    
+    - name: Build and push Docker image
+      run: |
+        # Build the Docker image
+        docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+        docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest .
+        
+        # Push both tags
+        docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+    
+    - name: Deploy to Azure Container Apps
+      run: |
+        az containerapp update \
+          --name ${{ env.CONTAINER_APP_NAME }} \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+    
+    - name: Verify deployment
+      run: |
+        # Get the FQDN of the container app
+        FQDN=$(az containerapp show \
+          --name ${{ env.CONTAINER_APP_NAME }} \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --query properties.configuration.ingress.fqdn \
+          --output tsv)
+        
+        echo "Container App URL: https://$FQDN"
+        
+        # Wait a moment for deployment to complete
+        sleep 30
+        
+        # Test health endpoint
+        curl -f "https://$FQDN/health" || echo "Health check failed"

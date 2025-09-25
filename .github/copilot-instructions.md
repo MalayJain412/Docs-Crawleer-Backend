@@ -51,168 +51,56 @@ Embedding & RAG specifics
 
 Patterns for new code
 - Prefer async functions for I/O; if a sync consumer exists, provide small sync wrappers that call asyncio.run(...) (see `azure_blob.py`).
-- Keep changes backward-compatible with `StorageManager` and domain folder layout.
-- If adding new endpoints, register them in `api/endpoints.py` and add Pydantic models in `api/models.py`.
+<!-- AI assistant guide for quickly understanding and contributing to this repo -->
+# Copilot instructions — AI contributor quick reference
 
-Tests & quick checks
-- There are simple tests scripts like `test_crawl.py` and `test_imports.py` — run these after dependency install.
-- Smoke test API: `curl http://localhost:8000/health` or GET `/`.
+Purpose
+- Quick, actionable notes to make an AI coding agent productive in this FastAPI + FAISS RAG crawler.
 
-Deployment hints (Azure Container Apps + ACR + Blob)
-- Dockerfile and Procfile are present. Use ACR to host the image, Container Apps for hosting.
-- Ensure `AZURE_STORAGE_ACCOUNT_URL` or `AZURE_STORAGE_CONNECTION_STRING` is set as a secret in the container app or prefer managed identity + container app identity + Storage Blob Data Contributor.
-- App listens on port 8000 by default; set `API_PORT`/`WEBSITES_PORT` accordingly.
+Core architecture (short)
+- FastAPI app: `src/main.py` + `src/api/endpoints.py` expose async endpoints for crawling, saving, embedding and RAG querying.
+- Pipeline: Crawl -> Parse -> Store (JSON + YAML) -> Embed -> FAISS (domain-scoped) -> RAG pipeline (`src/qa/rag_pipeline.py`).
 
-What to look at for deeper context
-- `src/storage/storage_manager.py` — domain folder conventions and file naming
-- `src/embeddings/embedding_service.py` — embedding providers & initialization
-- `src/qa/rag_pipeline.py` — how retrieval and LLM generation are wired
-- `src/api/endpoints.py` — all public API behaviour and background task patterns
+Key folders & files (what to open first)
+- `src/main.py` — app entry (used by uvicorn/gunicorn).
+- `src/api/endpoints.py` + `src/api/models.py` — public API surface and Pydantic shapes.
+- `src/crawler/web_crawler.py`, `src/crawler/content_parser.py` — fetching and extraction (async + trafilatura).
+- `src/storage/storage_manager.py`, `src/storage/azure_blob.py` — domain folder layout + cloud helpers.
+- `src/embeddings/embedding_service.py`, `src/embeddings/vector_store.py` — embedding providers + FAISS ops.
+- `src/qa/rag_pipeline.py` — retrieval + LLM answer generation and fallback.
 
-If you change dependencies
-- Update `requirements.txt` and the Dockerfile layering. Keep image small (use slim base and --no-cache-dir for pip).
+Important conventions (project-specific)
+- Domain-based storage: each domain under `data/{domain}/json/`, `yaml/`, `faiss/`. Use `StorageManager.get_domain_folder()` to construct paths.
+- Dual persistence: every dataset saved as JSON (machine) and YAML (human) — keep both updated when modifying storage logic.
+- Async-first: prefer async functions for I/O. If a sync API is required, add a thin wrapper that uses `asyncio.run(...)` (see `azure_blob.py`).
+- Import-fallback: many modules attempt absolute imports then append repo `src/` to `sys.path` for direct execution; preserve that pattern to avoid import errors.
 
-If anything here is unclear or you'd like me to expand sections (CI/CD, GitHub Actions for ACR push, or update storage_manager to call azure_blob helpers), say which area and I will iterate.
-# AI-Powered Documentation Crawler Copilot Instructions
+Env, run & quick checks
+- Defaults: `src/config/settings.py`. Common env vars: `API_PORT`, `DATA_DIR`, `GEMINI_API_KEY`, `AZURE_STORAGE_CONNECTION_STRING` / `AZURE_STORAGE_ACCOUNT_URL`, `AZURE_BLOB_CONTAINER`.
+- Install: `pip install -r requirements.txt`.
+- Run (dev): cd into `src/` then `python main.py` (uses uvicorn). Or from project root: `python run_server.py`.
+- Docker: `docker build -t faiss-backend .` then `docker run -e API_PORT=8000 -p 8000:8000 faiss-backend`.
+- Smoke: GET `/` or `/health` to verify server; `test_crawl.py` and `test_imports.py` are quick local checks.
 
-## Architecture Overview
+Embedding & RAG notes
+- `embedding_service.py` prefers Gemini (`google-generativeai`) and falls back to sentence-transformers. Respect CHUNK_SIZE/CHUNK_OVERLAP constants when chunking text.
+- FAISS files live in `data/{domain}/faiss/` with `index.faiss`, `index_info.json`, and `metadata.json`.
+- RAG pipeline includes LLM-first answers with a structured fallback (`_create_fallback_answer()`) — change prompts in `RAGPipeline._generate_llm_answer()`.
 
-This is a **RAG-powered documentation crawler** with a 3-stage pipeline: **Crawl → Embed → Query**. The system is domain-oriented, storing each crawled site separately with JSON/YAML dual formats and FAISS vector indexes.
+Where to be careful (gotchas)
+- Always run from `src/` if encountering import errors; the repo uses import fallback but tests and main expect `src` as working dir.
+- StorageManager is authoritative for folder names; changing layout will need updates across crawler, embeddings, and QA code.
+- When adding endpoints, register routes in `DocumentCrawlerAPI._setup_routes()` (see `src/api/endpoints.py`) and add corresponding Pydantic models in `src/api/models.py`.
 
-```
-FastAPI ← → [Crawler → Parser → Storage] → [Embeddings → FAISS] → [RAG Pipeline]
-```
+Examples (copy-paste patterns)
+- Add a new endpoint:
+  - File: `src/api/endpoints.py` under DocumentCrawlerAPI._setup_routes(); return Pydantic model from `src/api/models.py`.
+- Use storage manager:
+  - from `src.storage.storage_manager import StorageManager`
+  - path = StorageManager.get_domain_folder(domain, subfolder='faiss')
 
-## Key Components & Data Flow
+Next steps
+- If any area needs expansion (CI/CD, tests, or cloud deployment steps), tell me which section to expand and I will iterate.
 
-### 1. **Domain-Based Storage Pattern**
-- Each crawled site creates a domain folder: `data/{domain}/json/`, `data/{domain}/yaml/`, `data/{domain}/faiss/`
-- Always use `StorageManager.get_domain_folder()` to ensure proper structure
-- JSON for machine processing, YAML for human inspection, FAISS for vector search
-
-### 2. **Async-First Architecture**  
-- **All** I/O operations use async/await (crawler, embeddings, API)
-- WebCrawler uses `aiohttp.ClientSession` with configurable concurrency limits
-- Background tasks tracked in `DocumentCrawlerAPI.background_tasks` dict
-
-### 3. **Import Path Management**
-Critical: This project uses complex path resolution. Always follow the import pattern:
-```python
-# In any src/ file:
-try:
-    from config.settings import settings
-    from utils.logger import default_logger
-except ImportError:
-    # Fallback for direct execution
-    import sys
-    from pathlib import Path
-    sys.path.append(str(Path(__file__).parent.parent))
-    # then repeat imports
-```
-
-## Development Workflows
-
-### Running the System
-```bash
-# Always run from src/ directory
-cd src
-python main.py  # Starts FastAPI server on port 8000
-
-# Alternative: from project root
-python run_server.py  # Wrapper script
-```
-
-### Testing Workflow
-1. **Crawl**: `POST /crawl {"url": "https://docs.example.com", "domain_name": "example-docs"}`
-2. **Embed**: `POST /embed {"domain": "example-docs"}`  
-3. **Query**: `POST /query {"query": "...", "domain": "example-docs"}`
-
-Use `test_crawl.py` for development testing - it contains working examples.
-
-## Critical Configuration Patterns
-
-### Environment Setup
-- Copy `.env.example` → `.env` and set `GEMINI_API_KEY`
-- Settings in `src/config/settings.py` use dotenv with intelligent defaults
-- Storage paths always relative to `DATA_DIR` setting
-- **LLM Configuration**: New settings for enhanced responses: `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `RAG_CONTEXT_CHUNKS`
-
-### RAG Pipeline Architecture
-- **Dual Response System**: LLM-powered comprehensive responses with intelligent fallback
-- **Primary**: Gemini-generated structured responses using complex prompt templates
-- **Fallback**: Rich structured responses from `_create_fallback_answer()` when LLM unavailable
-- **Prompt Engineering**: Senior engineer-level prompt in `_generate_llm_answer()` produces actionable, copy-pasteable guidance
-
-### Embedding Strategy
-- **Primary**: Gemini embeddings via `google-generativeai`
-- **Fallback**: sentence-transformers when Gemini unavailable  
-- Chunking: 1000 chars with 100 overlap, max 50 chunks per doc
-
-### Error Handling Conventions
-- Use `default_logger` from `utils.logger` consistently
-- Background tasks store status in `background_tasks` dict with task_id keys
-- API returns proper HTTP status codes with detailed error messages
-- **RAG Failures**: Graceful degradation from LLM → structured fallback → basic response
-
-## Integration Points
-
-### Adding New Endpoints
-Extend `DocumentCrawlerAPI._setup_routes()` in `src/api/endpoints.py`. Follow async patterns:
-```python
-@self.app.post("/new-endpoint", response_model=ResponseModel)
-async def new_endpoint(request: RequestModel):
-    # Always use try/except with proper logging
-    # Return structured responses using Pydantic models
-```
-
-### Enhancing RAG Responses
-- **Prompt Templates**: Modify comprehensive prompt in `RAGPipeline._generate_llm_answer()`
-- **Fallback Logic**: Enhance `_create_fallback_answer()` for structured responses without LLM
-- **Content Extraction**: Use helper methods like `_extract_implementation_steps()`, `_extract_code_examples()`
-- **Response Structure**: Follow senior engineer pattern: TL;DR → Overview → Prerequisites → Implementation → Examples
-
-### Extending Crawling Logic  
-- Modify `WebCrawler` in `src/crawler/web_crawler.py`
-- Content parsing via `ContentParser` uses trafilatura for clean text extraction
-- URL normalization handled by `URLUtils.normalize_url()`
-
-### Custom Embedding Providers
-Implement in `EmbeddingService.generate_embedding()` with fallback pattern:
-```python
-try:
-    # Try primary provider
-    return await self._gemini_embedding(text)
-except Exception as e:
-    # Fall back to sentence-transformers
-    return self._sentence_transformer_embedding(text)
-```
-
-## Project-Specific Conventions
-
-- **Domain names** extracted via `URLUtils.extract_domain_name()` or custom via API
-- **File naming**: Individual docs saved as `{url_slug}.json` in `individual/` subdirs
-- **Vector metadata**: Stored alongside FAISS indexes with document chunk mappings
-- **Dual storage**: Every document saved in both JSON and YAML simultaneously
-- **Logging**: Module-specific loggers via `setup_logger(module_name, level)`
-
-## Debugging Tips
-
-1. **Import issues**: Always run from `src/` directory, check Python path setup
-2. **Storage problems**: Verify domain folder structure with `StorageManager.get_domain_folder()`
-3. **Embedding failures**: Check both Gemini API key and sentence-transformers fallback
-4. **Crawler issues**: Monitor `visited_urls` set and `failed_urls` for debugging loops
-5. **API issues**: Check background task status via `/tasks/{task_id}` endpoint
-6. **RAG Response Quality**: 
-   - If getting basic responses: verify `GEMINI_API_KEY` is uncommented in `.env`
-   - Check `self._llm_client` initialization in `RAGPipeline.__init__()`
-   - Monitor fallback vs LLM usage in logs
-   - Adjust `LLM_TEMPERATURE`, `LLM_MAX_TOKENS` for response style
-
-## Common Patterns
-
-- **Task tracking**: Generate UUID, store in `background_tasks`, return task_id to client
-- **Domain validation**: Always validate domain exists before operations via `storage_manager.get_domain_info()`
-- **Async resource management**: Use context managers for aiohttp sessions and file operations
-- **Configuration access**: Import `settings` globally, access via `settings.PROPERTY_NAME`
-- **Response Enhancement**: Use `_create_fallback_answer()` pattern for structured responses even without LLM
-- **Content Analysis**: Implement helper methods for extracting steps, code examples, and topics from documentation
+---
+Please review this condensed guide and tell me any missing examples or workflows to add.
