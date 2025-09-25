@@ -12,6 +12,7 @@ try:
     from utils.logger import default_logger
     from utils.url_utils import URLUtils
     from storage.schemas import DocumentContent, CrawlSession
+    from storage.azure_blob import upload_file_sync, download_file_sync
 except ImportError:
     # Fallback for direct execution
     import sys
@@ -21,6 +22,7 @@ except ImportError:
     from utils.logger import default_logger
     from utils.url_utils import URLUtils
     from storage.schemas import DocumentContent, CrawlSession
+    from storage.azure_blob import upload_file_sync, download_file_sync
 
 
 class StorageManager:
@@ -285,3 +287,110 @@ class StorageManager:
                     domains.append(stats)
         
         return domains
+    
+    def save_faiss_index_atomic(self, index_data: bytes, domain_folder: str, filename: str = "index.faiss") -> str:
+        """
+        Atomically save FAISS index file and optionally upload to blob storage.
+        
+        Args:
+            index_data: FAISS index data as bytes
+            domain_folder: Domain folder path
+            filename: FAISS index filename
+            
+        Returns:
+            Path to saved index file
+        """
+        faiss_dir = Path(domain_folder) / 'faiss'
+        faiss_dir.mkdir(parents=True, exist_ok=True)
+        
+        index_path = faiss_dir / filename
+        temp_path = faiss_dir / f"{filename}.tmp"
+        
+        try:
+            # Write to temporary file first
+            with open(temp_path, 'wb') as f:
+                f.write(index_data)
+            
+            # Atomic move to final location
+            os.replace(temp_path, index_path)
+            
+            self.logger.info(f"Saved FAISS index: {index_path}")
+            
+            # Upload to blob storage if configured
+            self._upload_to_blob_if_configured(str(index_path), domain_folder, filename)
+            
+            return str(index_path)
+            
+        except Exception as e:
+            # Clean up temp file if it exists
+            if temp_path.exists():
+                temp_path.unlink()
+            raise e
+    
+    def _upload_to_blob_if_configured(self, local_path: str, domain_folder: str, filename: str):
+        """
+        Upload file to blob storage if Azure storage is configured.
+        
+        Args:
+            local_path: Local file path
+            domain_folder: Domain folder path (used to create blob name)
+            filename: Filename for blob
+        """
+        try:
+            # Check if Azure storage is configured
+            storage_conn = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+            storage_url = os.getenv("AZURE_STORAGE_ACCOUNT_URL")
+            
+            if not (storage_conn or storage_url):
+                self.logger.debug("Azure storage not configured, skipping blob upload")
+                return
+            
+            # Create blob name with domain prefix
+            domain_name = Path(domain_folder).name
+            blob_name = f"{domain_name}/{filename}"
+            
+            # Upload using sync wrapper (since this method is sync)
+            upload_file_sync(local_path, blob_name=blob_name)
+            
+            self.logger.info(f"Uploaded {filename} to blob: {blob_name}")
+            
+        except Exception as e:
+            # Log error but don't fail the main operation
+            self.logger.warning(f"Failed to upload {filename} to blob storage: {e}")
+    
+    def download_faiss_index_from_blob(self, domain_folder: str, filename: str = "index.faiss") -> Optional[str]:
+        """
+        Download FAISS index from blob storage if available.
+        
+        Args:
+            domain_folder: Domain folder path
+            filename: FAISS index filename
+            
+        Returns:
+            Path to downloaded file or None if not available
+        """
+        try:
+            # Check if Azure storage is configured
+            storage_conn = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+            storage_url = os.getenv("AZURE_STORAGE_ACCOUNT_URL")
+            
+            if not (storage_conn or storage_url):
+                self.logger.debug("Azure storage not configured, skipping blob download")
+                return None
+            
+            faiss_dir = Path(domain_folder) / 'faiss'
+            faiss_dir.mkdir(parents=True, exist_ok=True)
+            
+            local_path = faiss_dir / filename
+            domain_name = Path(domain_folder).name
+            blob_name = f"{domain_name}/{filename}"
+            
+            # Download using sync wrapper
+            download_file_sync(str(local_path), blob_name=blob_name)
+            
+            self.logger.info(f"Downloaded {filename} from blob: {blob_name}")
+            return str(local_path)
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to download {filename} from blob storage: {e}")
+            return None

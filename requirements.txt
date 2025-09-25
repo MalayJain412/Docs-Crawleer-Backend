@@ -16,3 +16,5 @@ asyncio
 beautifulsoup4
 pydantic-settings
 gunicorn
+azure-storage-blob>=12.14.0
+azure-identity>=1.13.0

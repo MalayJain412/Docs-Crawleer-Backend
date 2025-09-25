@@ -1,3 +1,78 @@
+<!-- AI assistant guide for quickly understanding and contributing to this repo -->
+# Copilot instructions — AI contributor quick reference
+
+Purpose
+- Short, actionable guidance so an AI coding agent can be productive immediately in this FastAPI + FAISS project.
+
+High-level architecture (the "why")
+- FastAPI app (src/main.py + src/api/endpoints.py) exposes async endpoints to: crawl sites, save documents, create embeddings, and answer queries via a RAG pipeline.
+- Crawl → Parse → Store (JSON + YAML) → Embed → FAISS vector store → RAG query
+- Async-first throughout: crawler, embeddings, and many I/O helpers use asyncio/aiohttp/async SDKs.
+
+Key directories & responsibilities
+- `src/` — application source
+  - `main.py` — app entrypoint (creates FastAPI app; used by gunicorn/uvicorn)
+  - `api/` — FastAPI routes (`endpoints.py`), Pydantic request/response models (`models.py`)
+  - `crawler/` — `web_crawler.py`, `content_parser.py` (aiohttp + trafilatura)
+  - `storage/` — `storage_manager.py` (domain folders, JSON/YAML), `azure_blob.py` (async blob helpers)
+  - `embeddings/` — `embedding_service.py` (Gemini primary, sentence-transformers fallback), `vector_store.py` (FAISS operations)
+  - `qa/` — `rag_pipeline.py` (RAG orchestration and domain index management)
+
+Project-specific conventions
+- Domain-based storage: data/{domain}/json, data/{domain}/yaml, data/{domain}/faiss. Use StorageManager.get_domain_folder().
+- Dual-format persistence: every dataset saved in both JSON (machine) and YAML (human) for the same domain.
+- Async-first I/O: prefer async helpers (see `storage/azure_blob.py` which exposes async and sync wrappers).
+- Import fallback pattern: modules try absolute imports then append project root to sys.path for direct execution; preserve this when adding files.
+
+Developer workflows (commands you can run)
+- Install deps: `pip install -r requirements.txt`
+- Run locally (dev):
+  - from project root: `cd src` then `python main.py` (main uses uvicorn)
+  - or use gunicorn as in Dockerfile / Procfile: `gunicorn --config gunicorn.conf.py src.main:app`
+- Docker build & test (from repo root):
+  - `docker build -t faiss-backend .`
+  - `docker run -e API_PORT=8000 -p 8000:8000 faiss-backend`
+
+Important env & config
+- `src/config/settings.py` holds defaults. Common env vars used:
+  - `API_HOST`, `API_PORT`, `API_RELOAD`, `LOG_LEVEL`
+  - `DATA_DIR` — base path for domain folders
+  - `GEMINI_API_KEY` — primary embedding provider
+  - `AZURE_STORAGE_CONNECTION_STRING` or `AZURE_STORAGE_ACCOUNT_URL` — storage access
+  - `AZURE_BLOB_CONTAINER` (default `faiss-indexes`)
+
+Storage & cloud integration notes
+- Blob access: `src/storage/azure_blob.py` supports both connection-string and Managed Identity (DefaultAzureCredential). When using Container Apps prefer Managed Identity and set `AZURE_STORAGE_ACCOUNT_URL=https://<account>.blob.core.windows.net`.
+- FAISS indexes are stored in `data/{domain}/faiss/` alongside `metadata.json` and `index_info.json`.
+
+Embedding & RAG specifics
+- `embedding_service.py` tries Gemini (google-generativeai) first, falls back to sentence-transformers. Keep batched embedding shape and chunking (CHUNK_SIZE, CHUNK_OVERLAP) consistent with settings.
+- VectorStore/FAISS operations live in `embeddings/vector_store.py` and are domain-scoped.
+
+Patterns for new code
+- Prefer async functions for I/O; if a sync consumer exists, provide small sync wrappers that call asyncio.run(...) (see `azure_blob.py`).
+- Keep changes backward-compatible with `StorageManager` and domain folder layout.
+- If adding new endpoints, register them in `api/endpoints.py` and add Pydantic models in `api/models.py`.
+
+Tests & quick checks
+- There are simple tests scripts like `test_crawl.py` and `test_imports.py` — run these after dependency install.
+- Smoke test API: `curl http://localhost:8000/health` or GET `/`.
+
+Deployment hints (Azure Container Apps + ACR + Blob)
+- Dockerfile and Procfile are present. Use ACR to host the image, Container Apps for hosting.
+- Ensure `AZURE_STORAGE_ACCOUNT_URL` or `AZURE_STORAGE_CONNECTION_STRING` is set as a secret in the container app or prefer managed identity + container app identity + Storage Blob Data Contributor.
+- App listens on port 8000 by default; set `API_PORT`/`WEBSITES_PORT` accordingly.
+
+What to look at for deeper context
+- `src/storage/storage_manager.py` — domain folder conventions and file naming
+- `src/embeddings/embedding_service.py` — embedding providers & initialization
+- `src/qa/rag_pipeline.py` — how retrieval and LLM generation are wired
+- `src/api/endpoints.py` — all public API behaviour and background task patterns
+
+If you change dependencies
+- Update `requirements.txt` and the Dockerfile layering. Keep image small (use slim base and --no-cache-dir for pip).
+
+If anything here is unclear or you'd like me to expand sections (CI/CD, GitHub Actions for ACR push, or update storage_manager to call azure_blob helpers), say which area and I will iterate.
 # AI-Powered Documentation Crawler Copilot Instructions
 
 ## Architecture Overview

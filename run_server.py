@@ -21,12 +21,24 @@ os.chdir(src_dir)
 # Import and run main
 try:
     from main import main
-    
+
     if __name__ == "__main__":
-        print(f"Starting server from: {os.getcwd()}")
+        # Respect container apps / App Service ports if provided
+        port = os.getenv("API_PORT") or os.getenv("PORT") or os.getenv("WEBSITES_PORT") or "8000"
+        os.environ["API_PORT"] = port
+        os.environ["PORT"] = port
+        print(f"Starting server from: {os.getcwd()} (port={port})")
         print(f"Python path includes: {src_dir}")
+
+        # Print detected Azure storage settings (non-sensitive)
+        storage_conn = bool(os.getenv("AZURE_STORAGE_CONNECTION_STRING"))
+        storage_url = bool(os.getenv("AZURE_STORAGE_ACCOUNT_URL"))
+        print(f"AZURE_STORAGE_CONNECTION_STRING set: {storage_conn}")
+        print(f"AZURE_STORAGE_ACCOUNT_URL set: {storage_url} (use Managed Identity if true)")
+
+        # Start main (main() should read settings / env as needed)
         main()
-        
+
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure all dependencies are installed:")
