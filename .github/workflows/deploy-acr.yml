@@ -7,66 +7,49 @@ on:
     branches: [ master, main ]
 
 env:
-  # Azure Container Registry (ACR)
+  # Azure Container Registry (replace with yours)
   ACR_NAME: "docsralrbackcr"
-  # Resource group where ACR and Container App live
+  # Resource group
   RESOURCE_GROUP: "docs-crawaller-bck"
-  # Container App name to update
+  # Container App name
   CONTAINER_APP_NAME: "docswalrback"
-  # Image repository inside ACR
+  # Image name inside ACR
   IMAGE_NAME: "docswalrback"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Log in to Azure
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: Log in to Azure Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: ${{ env.ACR_NAME }}.azurecr.io
-        username: ${{ secrets.ACR_USERNAME }}
-        password: ${{ secrets.ACR_PASSWORD }}
+      - name: Build and push Docker image
+        run: |
+          az acr login --name $ACR_NAME
+          docker build -t $ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }} .
+          docker tag $ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }} $ACR_NAME.azurecr.io/$IMAGE_NAME:latest
+          docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }}
+          docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:latest
 
-    - name: Build and push Docker image
-      run: |
-        # Build the Docker image with SHA and latest tags
-        docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} .
-        docker tag ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} \
-                   ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+      - name: Deploy to Azure Container Apps
+        run: |
+          az containerapp update \
+            --name $CONTAINER_APP_NAME \
+            --resource-group $RESOURCE_GROUP \
+            --image $ACR_NAME.azurecr.io/$IMAGE_NAME:${{ github.sha }}
 
-        # Push both tags to ACR
-        docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
-
-    - name: Deploy to Azure Container Apps
-      run: |
-        az containerapp update \
-          --name ${{ env.CONTAINER_APP_NAME }} \
-          --resource-group ${{ env.RESOURCE_GROUP }} \
-          --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-    - name: Verify deployment
-      run: |
-        # Get the FQDN of the container app
-        FQDN=$(az containerapp show \
-          --name ${{ env.CONTAINER_APP_NAME }} \
-          --resource-group ${{ env.RESOURCE_GROUP }} \
-          --query properties.configuration.ingress.fqdn \
-          --output tsv)
-
-        echo "Container App URL: https://$FQDN"
-        
-        # Wait for deployment rollout
-        sleep 30
-        
-        # Try hitting health endpoint (adjust if different)
-        curl -f "https://$FQDN/health" || echo "Health check failed"
+      - name: Verify deployment
+        run: |
+          FQDN=$(az containerapp show \
+            --name $CONTAINER_APP_NAME \
+            --resource-group $RESOURCE_GROUP \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv)
+          echo "Container App URL: https://$FQDN"
+          sleep 30
+          curl -f "https://$FQDN/health" || echo "Health check failed"
