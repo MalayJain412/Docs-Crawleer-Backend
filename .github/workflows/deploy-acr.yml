@@ -7,14 +7,14 @@ on:
     branches: [ master, main ]
 
 env:
-  # Azure Container Registry
-  ACR_NAME: "intelligentdocsacr"
+  # Azure Container Registry (ACR)
+  ACR_NAME: "docsralrbackcr"
   # Resource group where ACR and Container App live
-  RESOURCE_GROUP: "intelligent-docs-rg"
+  RESOURCE_GROUP: "docs-crawaller-bck"
   # Container App name to update
-  CONTAINER_APP_NAME: "intelligent-docs-backend"
-  # Image name (repository) inside ACR
-  IMAGE_NAME: "intelligent-docs-backend"
+  CONTAINER_APP_NAME: "docswalrback"
+  # Image repository inside ACR
+  IMAGE_NAME: "docswalrback"
 
 jobs:
   build-and-deploy:
@@ -40,7 +40,8 @@ jobs:
       run: |
         # Build the Docker image with SHA and latest tags
         docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} .
-        docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest .
+        docker tag ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+                   ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
 
         # Push both tags to ACR
         docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
@@ -61,11 +62,11 @@ jobs:
           --resource-group ${{ env.RESOURCE_GROUP }} \
           --query properties.configuration.ingress.fqdn \
           --output tsv)
-        
+
         echo "Container App URL: https://$FQDN"
         
-        # Wait a moment for deployment to complete
+        # Wait for deployment rollout
         sleep 30
         
-        # Test health endpoint
+        # Try hitting health endpoint (adjust if different)
         curl -f "https://$FQDN/health" || echo "Health check failed"
