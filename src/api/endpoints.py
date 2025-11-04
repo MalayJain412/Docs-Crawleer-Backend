@@ -21,8 +21,9 @@ try:
     from qa.rag_pipeline import RAGPipeline
     from api.models import (
         CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
-        QueryRequest, QueryResponse, DomainInfo, StatusResponse,
-        HealthResponse, ErrorResponse
+        QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
+        HealthResponse, ErrorResponse, DomainsValidationRequest,
+        DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
     )
 except ImportError:
     # Fallback for direct execution
@@ -40,8 +41,9 @@ except ImportError:
     from qa.rag_pipeline import RAGPipeline
     from api.models import (
         CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
-        QueryRequest, QueryResponse, DomainInfo, StatusResponse,
-        HealthResponse, ErrorResponse
+        QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
+        HealthResponse, ErrorResponse, DomainsValidationRequest,
+        DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
     )
 
 
@@ -288,6 +290,127 @@ class DocumentCrawlerAPI:
                 self.logger.error(f"Query failed for domain '{request.domain}': {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
         
+        @self.app.post("/query-multi-domain", response_model=MultiDomainQueryResponse)
+        async def query_multi_domain(request: MultiDomainQueryRequest):
+            """Query across multiple domains simultaneously."""
+            start_time = time.time()
+            
+            try:
+                # Get domains list directly (no normalization needed)
+                domains = request.domains
+                
+                # Validate domains list
+                if len(domains) > 10:  # Reasonable limit
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Too many domains requested (max 10)"
+                    )
+                
+                # Log the query for monitoring
+                self.logger.info(f"Processing multi-domain query for domains {domains}: {request.query[:100]}{'...' if len(request.query) > 100 else ''}")
+                
+                # Call RAG pipeline
+                result = await self.rag_pipeline.answer_query_multi_domain(
+                    query=request.query,
+                    domains=domains,
+                    top_k=request.top_k
+                )
+                
+                # Log response metrics
+                processing_time = time.time() - start_time
+                self.logger.info(f"Multi-domain query completed for domains {domains} in {processing_time:.3f}s")
+                
+                return MultiDomainQueryResponse(
+                    query=request.query,
+                    answer=result.get("answer", ""),
+                    sources=result.get("sources", []),
+                    domains_searched=result.get("domains_searched", domains),
+                    total_results=result.get("total_results", 0),
+                    processing_time=processing_time,
+                    domain_status=result.get("domain_status")
+                )
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                self.logger.error(f"Multi-domain query failed: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Multi-domain query processing failed: {str(e)}")
+        
+        @self.app.get("/domains/available", response_model=AvailableDomainsResponse)
+        async def get_available_domains():
+            """Get list of all available domains with FAISS indexes."""
+            try:
+                available_domains = []
+                # Use the same data directory as StorageManager
+                data_dir = Path(settings.DATA_DIR)
+                
+                if data_dir.exists():
+                    for domain_path in data_dir.iterdir():
+                        if domain_path.is_dir() and domain_path.name != 'logs':
+                            faiss_dir = domain_path / "faiss"
+                            index_file = faiss_dir / "index.faiss"
+                            
+                            if index_file.exists():
+                                available_domains.append(domain_path.name)
+                
+                # Sort domains alphabetically
+                available_domains.sort()
+                
+                return AvailableDomainsResponse(
+                    domains=available_domains,
+                    total_count=len(available_domains)
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Failed to get available domains: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/domains/validate", response_model=DomainsValidationResponse)
+        async def validate_domains(request: DomainsValidationRequest):
+            """Validate that requested domains have available FAISS indexes."""
+            try:
+                if not request.domains:
+                    return DomainsValidationResponse(
+                        domain_status={},
+                        valid_domains=[],
+                        invalid_domains=[]
+                    )
+                
+                domain_status = {}
+                valid_domains = []
+                invalid_domains = []
+                
+                for domain in request.domains:
+                    try:
+                        # Construct path directly to match the data structure
+                        data_dir = Path(settings.DATA_DIR)
+                        domain_folder = data_dir / domain
+                        faiss_dir = domain_folder / "faiss"
+                        index_file = faiss_dir / "index.faiss"
+                        
+                        is_valid = index_file.exists()
+                        domain_status[domain] = is_valid
+                        
+                        if is_valid:
+                            valid_domains.append(domain)
+                        else:
+                            invalid_domains.append(domain)
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Error validating domain {domain}: {e}")
+                        domain_status[domain] = False
+                        invalid_domains.append(domain)
+                
+                return DomainsValidationResponse(
+                    domain_status=domain_status,
+                    valid_domains=valid_domains,
+                    invalid_domains=invalid_domains
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Domain validation failed: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.get("/domains", response_model=List[DomainInfo])
         async def list_domains():
             """List all available domains with their information."""

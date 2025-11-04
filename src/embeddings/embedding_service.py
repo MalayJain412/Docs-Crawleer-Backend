@@ -62,12 +62,25 @@ class EmbeddingService:
             import google.generativeai as genai
             
             genai.configure(api_key=settings.GEMINI_API_KEY)
-            
-            # Test the model with Gemini Flash (latest version available for embeddings and generation)
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            test_response = model.generate_content("Test")
-            
-            return genai
+            # Try to test the embedding model first using configured model name
+            try:
+                test_result = genai.embed_content(
+                    model=settings.GEMINI_EMBEDDING_MODEL,
+                    content="Test",
+                    task_type="retrieval_document"
+                )
+
+                if isinstance(test_result, dict) and 'embedding' in test_result:
+                    return genai
+            except Exception:
+                # If embedding test fails, try a lightweight generation test using the LLM model
+                try:
+                    model = genai.GenerativeModel(settings.GEMINI_LLM_MODEL)
+                    _ = model.generate_content("Test")
+                    return genai
+                except Exception as e:
+                    self.logger.warning(f"Gemini generation test failed: {e}")
+                    return None
             
         except ImportError:
             self.logger.warning("google-generativeai not installed, skipping Gemini")
@@ -135,7 +148,7 @@ class EmbeddingService:
                     try:
                         # Use text embedding model
                         result = genai.embed_content(
-                            model="models/embedding-001",
+                            model=settings.GEMINI_EMBEDDING_MODEL,
                             content=text,
                             task_type="retrieval_document"
                         )
