@@ -297,12 +297,13 @@ class EmbeddingService:
         
         return result
     
-    async def embed_documents(self, documents: List[DocumentContent]) -> List[ContentChunk]:
+    async def embed_documents(self, documents: List[DocumentContent], progress_callback=None) -> List[ContentChunk]:
         """
         Create embeddings for a list of documents.
         
         Args:
             documents: List of DocumentContent objects
+            progress_callback: Optional callback for progress updates
             
         Returns:
             List of ContentChunk objects with embeddings
@@ -312,11 +313,29 @@ class EmbeddingService:
         
         self.logger.info(f"Processing {len(documents)} documents for embedding")
         
-        # Chunk all documents
+        # Report initial progress
+        if progress_callback:
+            await progress_callback({
+                'stage': 'chunking',
+                'documents_processed': 0,
+                'total_documents': len(documents),
+                'chunks_created': 0
+            })
+        
+        # Chunk all documents with progress tracking
         all_chunks = []
-        for doc in documents:
+        for i, doc in enumerate(documents):
             chunks = self.chunk_document(doc)
             all_chunks.extend(chunks)
+            
+            # Report chunking progress
+            if progress_callback:
+                await progress_callback({
+                    'stage': 'chunking',
+                    'documents_processed': i + 1,
+                    'total_documents': len(documents),
+                    'chunks_created': len(all_chunks)
+                })
         
         self.logger.info(f"Created {len(all_chunks)} chunks from {len(documents)} documents")
         
@@ -326,13 +345,44 @@ class EmbeddingService:
         # Extract text content for embedding
         chunk_texts = [chunk.content for chunk in all_chunks]
         
-        # Generate embeddings
+        # Report embedding start
+        if progress_callback:
+            await progress_callback({
+                'stage': 'embedding',
+                'chunks_processed': 0,
+                'total_chunks': len(all_chunks)
+            })
+        
+        # Generate embeddings with batch processing for progress tracking
         try:
-            embeddings = await self.generate_embeddings(chunk_texts)
+            # Process in batches to provide better progress updates
+            batch_size = 50  # Process 50 chunks at a time
+            embeddings = []
+            
+            for i in range(0, len(chunk_texts), batch_size):
+                batch_texts = chunk_texts[i:i + batch_size]
+                batch_embeddings = await self.generate_embeddings(batch_texts)
+                embeddings.extend(batch_embeddings)
+                
+                # Report embedding progress
+                if progress_callback:
+                    await progress_callback({
+                        'stage': 'embedding',
+                        'chunks_processed': len(embeddings),
+                        'total_chunks': len(all_chunks)
+                    })
             
             # Assign embeddings to chunks
             for chunk, embedding in zip(all_chunks, embeddings):
                 chunk.embedding = embedding
+            
+            # Report completion
+            if progress_callback:
+                await progress_callback({
+                    'stage': 'completed',
+                    'chunks_processed': len(all_chunks),
+                    'total_chunks': len(all_chunks)
+                })
             
             self.logger.info(f"Successfully generated embeddings for {len(all_chunks)} chunks")
             return all_chunks

@@ -75,7 +75,7 @@ class WebCrawler:
         if self.session and self._own_session:
             await self.session.close()
     
-    async def crawl_domain(self, start_url: str, base_domain: str = None, max_depth: int = None) -> CrawlSession:
+    async def crawl_domain(self, start_url: str, base_domain: str = None, max_depth: int = None, progress_callback=None) -> CrawlSession:
         """
         Crawl an entire documentation domain.
         
@@ -83,6 +83,7 @@ class WebCrawler:
             start_url: Starting URL for crawling
             base_domain: Base domain to restrict crawling (auto-detected if None)
             max_depth: Maximum crawling depth (None for unlimited)
+            progress_callback: Optional callback function for progress updates
             
         Returns:
             CrawlSession with crawling results
@@ -109,7 +110,7 @@ class WebCrawler:
         
         # Start crawling
         try:
-            await self._crawl_recursive(start_url, base_domain, max_depth)
+            await self._crawl_recursive(start_url, base_domain, max_depth, progress_callback)
             
             session.status = "completed"
             session.completed_at = time.time()
@@ -128,7 +129,7 @@ class WebCrawler:
         
         return session
     
-    async def _crawl_recursive(self, start_url: str, base_domain: str, max_depth: Optional[int]):
+    async def _crawl_recursive(self, start_url: str, base_domain: str, max_depth: Optional[int], progress_callback=None):
         """Recursive crawling implementation using BFS."""
         # Queue of (url, depth) tuples
         crawl_queue = deque([(start_url, 0)])
@@ -165,6 +166,17 @@ class WebCrawler:
             ]
             
             await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Report progress if callback provided
+            if progress_callback:
+                total_processed = len(self.visited_urls) + len(self.failed_urls)
+                successful_count = len(self.crawled_documents)
+                await progress_callback({
+                    'total_processed': total_processed,
+                    'successful_pages': successful_count,
+                    'failed_pages': len(self.failed_urls),
+                    'queue_remaining': len(crawl_queue)
+                })
             
             # Add delay between batches
             if crawl_queue:
