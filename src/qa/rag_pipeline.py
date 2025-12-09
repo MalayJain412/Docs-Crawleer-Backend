@@ -45,6 +45,9 @@ class RAGPipeline:
             # Initialize LLM client
             self._llm_client = await self._init_llm_client()
             
+            # Initialize multi-domain store semaphore (ensure it's created in correct event loop)
+            self.multi_domain_store = MultiDomainVectorStore(max_concurrent_domains=5)
+            
             self.logger.info("RAG pipeline initialized successfully")
             
         except Exception as e:
@@ -625,74 +628,141 @@ Query:
             Answer with sources and metadata
         """
         try:
+            self.logger.info(f"Starting multi-domain query for domains: {domains}")
+            
             # Validate domains first
+            self.logger.debug("Validating domains...")
             domain_status = await self.multi_domain_store.validate_domains(domains)
             valid_domains = [d for d, status in domain_status.items() if status]
             
+            self.logger.info(f"Domain validation results: {domain_status}")
+            self.logger.info(f"Valid domains: {valid_domains}")
+            
             if not valid_domains:
                 return {
-                    "answer": "",
+                    "answer": "No domains with embeddings found. Please ensure the selected domains have been crawled and embedded.",
                     "sources": [],
                     "error": "No valid domains found with FAISS indexes",
                     "domain_status": domain_status
                 }
             
             # Generate query embedding
-            query_embedding = await self.embedding_service.embed_text(query)
+            self.logger.debug("Generating query embedding...")
+            query_embeddings = await self.embedding_service.generate_embeddings([query])
+            if not query_embeddings:
+                return {
+                    "answer": self._create_fallback_answer([]),
+                    "sources": [],
+                    "error": "Failed to generate query embedding"
+                }
+            query_embedding = query_embeddings[0]
+            self.logger.debug(f"Generated embedding of dimension: {len(query_embedding)}")
             
             # Search across domains
+            self.logger.debug(f"Searching across {len(valid_domains)} domains...")
             search_results = await self.multi_domain_store.search_domains(
                 domains=valid_domains,
                 query_embedding=query_embedding,
                 top_k=top_k
             )
             
+            self.logger.info(f"Found {len(search_results)} search results across domains")
+            
             if not search_results:
                 return {
                     "answer": self._create_fallback_answer([]),
                     "sources": [],
-                    "note": "No relevant documents found across domains"
+                    "note": "No relevant documents found across domains",
+                    "domains_searched": valid_domains
                 }
             
             # Prepare context for LLM
-            context_docs = [
-                {
+            context_docs = []
+            for result in search_results:
+                # Fix URL field mapping - check multiple possible field names
+                source_url = result.source_url
+                if not source_url or source_url == 'undefined':
+                    # Try alternative field names from metadata
+                    metadata = result.metadata or {}
+                    source_url = (
+                        metadata.get('url') or 
+                        metadata.get('source_url') or 
+                        metadata.get('link') or 
+                        metadata.get('page_url') or 
+                        metadata.get('original_url') or
+                        ''
+                    )
+                
+                context_doc = {
                     "content": result.content,
-                    "source_url": result.source_url,
+                    "source_url": source_url,
                     "domain": result.domain,
-                    "score": result.normalized_score
+                    "similarity_score": result.normalized_score,
+                    "metadata": result.metadata
                 }
-                for result in search_results
-            ]
+                context_docs.append(context_doc)
+            
+            self.logger.debug(f"Prepared {len(context_docs)} context documents for LLM")
             
             # Generate answer
+            self.logger.debug("Generating LLM answer...")
             answer = await self._generate_llm_answer(query, context_docs)
             
             # Prepare sources
-            sources = [
-                {
+            sources = []
+            for result in search_results:
+                # Fix URL field mapping for sources too
+                source_url = result.source_url
+                if not source_url or source_url == 'undefined':
+                    # Try alternative field names from metadata
+                    metadata = result.metadata or {}
+                    source_url = (
+                        metadata.get('url') or 
+                        metadata.get('source_url') or 
+                        metadata.get('link') or 
+                        metadata.get('page_url') or 
+                        metadata.get('original_url') or
+                        'No URL available'
+                    )
+                
+                source = {
                     "domain": result.domain,
                     "chunk_id": result.chunk_id,
-                    "source_url": result.source_url,
+                    "source_url": source_url,
                     "score": result.normalized_score,
-                    "chunk_index": result.chunk_index
+                    "chunk_index": result.chunk_index,
+                    "title": result.metadata.get('title', 'Untitled') if result.metadata else 'Untitled',
+                    "snippet": result.content[:200] + "..." if len(result.content) > 200 else result.content
                 }
-                for result in search_results
-            ]
+                sources.append(source)
+            
+            self.logger.info(f"Multi-domain query completed successfully with {len(sources)} sources")
             
             return {
                 "answer": answer,
                 "sources": sources,
                 "domains_searched": valid_domains,
-                "total_results": len(search_results)
+                "total_results": len(search_results),
+                "query": query,
+                "processing_info": {
+                    "domains_requested": domains,
+                    "domains_validated": domain_status,
+                    "domains_searched": valid_domains,
+                    "results_per_domain": {
+                        domain: len([r for r in search_results if r.domain == domain])
+                        for domain in valid_domains
+                    }
+                }
             }
             
         except Exception as e:
-            self.logger.error(f"Multi-domain query failed: {e}")
+            self.logger.error(f"Multi-domain query failed: {e}", exc_info=True)
             return {
                 "answer": self._create_fallback_answer([]),
                 "sources": [],
-                "error": str(e)
+                "error": str(e),
+                "query": query,
+                "domains_requested": domains
             }
     
     def get_available_domains(self) -> List[str]:

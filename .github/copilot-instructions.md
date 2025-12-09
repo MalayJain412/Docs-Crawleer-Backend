@@ -12,17 +12,19 @@ FastAPI-based RAG system for crawling docs and Q/A. Layered: Crawler → Parser 
 - **Config**: `src/config/settings.py` (dotenv-based env vars, no hardcoded values)
 
 ## Key Patterns
-- **Domain Organization**: Data in `data/{domain}/` with json/yaml/faiss subdirs; per-domain vector stores
+- **Domain Organization**: Data in `src/data/{domain}/` with json/yaml/faiss subdirs; per-domain vector stores
+- **Multi-Domain Queries**: Frontend supports checkbox selection; backend uses `MultiDomainVectorStore` for cross-domain search
 - **Async-First**: Use `aiohttp`, not `requests`; all ops async with `await`; background tasks for long-running ops
-- **Import Strategy**: Absolute from `src/`; run `cd src && python main.py`; PYTHONPATH set in main.py; fallback imports in endpoints.py
-- **Config**: `src/config/settings.py` via env vars; require `GEMINI_API_KEY`; defaults for all settings
-- **Fallbacks**: Embedding: ST → Gemini; HTTP retries with backoff; dual JSON/YAML storage
+- **Import Strategy**: Absolute from `src/`; `run_server.py` handles PYTHONPATH; fallback imports in endpoints.py
+- **Config**: `src/config/settings.py` via env vars; require `GEMINI_API_KEY`; server defaults to port 5002
+- **Fallbacks**: Embedding: sentence-transformers → Gemini; HTTP retries with backoff; dual JSON/YAML storage
 - **Routes**: Added in `DocumentCrawlerAPI._setup_routes()`; use `BackgroundTasks` for crawl/embed; task tracking with IDs
 - **Models**: Pydantic in `src/api/models.py`; schemas in `src/storage/schemas.py`
 
 ## Development Workflows
-- **Run Dev**: `cd src && python main.py` (sets PYTHONPATH, imports from config)
-- **Prod**: `gunicorn -c gunicorn.conf.py src.main:app` (for deployment)
+- **Run Dev**: `python run_server.py` (handles PYTHONPATH, venv activation, runs on port 5002)
+- **Quick Deploy**: `.\deploy.bat` (starts backend + frontend servers with proper venv setup)
+- **Frontend**: `dfrontend/` serves static files; `dfrontend/js/config.js` for API endpoints
 - **API Dev**: Add routes in `DocumentCrawlerAPI._setup_routes()`; models in `src/api/models.py`; use `BackgroundTasks`
 - **Storage**: Use `StorageManager` for domain folders; saves json+yaml auto; `get_domain_folder()` for paths
 - **Vectors**: Per-domain `VectorStore`; FAISS with metadata; `MultiDomainVectorStore` for cross-domain queries
@@ -36,14 +38,15 @@ FastAPI-based RAG system for crawling docs and Q/A. Layered: Crawler → Parser 
 - API → All: Endpoints trigger background tasks; status via `/tasks/{task_id}`
 
 ## Common Gotchas
-- Import errors: Run from `src/` or set PYTHONPATH; main.py adds paths automatically
-- Missing GEMINI_API_KEY: Fails LLM ops; set in .env
-- Domain isolation: Separate embed/index per domain; use domain names consistently
+- Import errors: Use `python run_server.py`, not direct `main.py`; run_server.py sets PYTHONPATH automatically
+- Missing GEMINI_API_KEY: Fails LLM ops; set in .env or venv activation
+- Domain filtering: Embed dropdown shows domains WITHOUT embeddings; query shows domains WITH embeddings
+- URL field mapping: Multi-domain results check multiple field names (`url`, `source_url`, `link`, `page_url`)
 - Async: Don't mix sync/async; use await; background tasks for crawl/embed
 - Memory: FAISS loads per domain; large domains use RAM; chunk size configurable
-- Config: All via env vars; no defaults in code except in settings.py
+- Config: All via env vars; server runs on port 5002, frontend on 3000
 - Routes: Decorators in _setup_routes(); not class methods
-- Storage: Dual json/yaml; individual docs in subfolders
+- Storage: Dual json/yaml; individual docs in subfolders with domain isolation
 
 ## Testing
 - Integration: `test_crawl.py`
