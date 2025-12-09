@@ -22,4 +22,4 @@ os.chdir(src_dir)
 from main import app
 
 # ---- Expose the ASGI app ----
-application = app  # 👈 Gunicorn will look for this
+application = app  # Gunicorn will look for this

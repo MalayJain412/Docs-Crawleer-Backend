@@ -45,7 +45,7 @@ class Settings:
     
     # FastAPI Settings
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT: int = int(os.getenv("API_PORT", "8000"))
+    API_PORT: int = int(os.getenv("API_PORT", "8006"))
     API_RELOAD: bool = os.getenv("API_RELOAD", "true").lower() == "true"
 
 

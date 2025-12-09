@@ -24,7 +24,7 @@ try:
 
     if __name__ == "__main__":
         # Respect container apps / App Service ports if provided
-        port = os.getenv("API_PORT") or os.getenv("PORT") or os.getenv("WEBSITES_PORT") or "8000"
+        port = os.getenv("API_PORT") or os.getenv("PORT") or os.getenv("WEBSITES_PORT") or "8006"
         os.environ["API_PORT"] = port
         os.environ["PORT"] = port
         print(f"Starting server from: {os.getcwd()} (port={port})")
