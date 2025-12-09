@@ -787,4 +787,5 @@ Query:
                 domain: store.get_statistics() 
                 for domain, store in self.vector_stores.items()
             }
+
         }
