@@ -1,41 +1,49 @@
 # AI-Powered Documentation Crawler & Q/A System - Copilot Instructions
 
 ## Architecture Overview
-FastAPI-based RAG system for crawling docs and Q/A. Layered: Crawler → Parser → Storage → Embeddings → Vector Store → RAG Pipeline. Domain-based data isolation.
+FastAPI-based RAG system for crawling docs and Q/A. Layered: Crawler → Parser → Storage → Embeddings → Vector Store → RAG Pipeline. Domain-based data isolation with separate FAISS indexes per domain.
 
 ## Core Components
-- **Backend**: `src/main.py`, `src/api/endpoints.py` (async REST API)
-- **Storage**: `src/storage/` (domain folders: json/yaml/faiss)
+- **Backend**: `src/main.py`, `src/api/endpoints.py` (async REST API with background tasks)
+- **Storage**: `src/storage/` (domain folders: json/yaml/faiss subdirs; dual JSON/YAML persistence)
 - **Frontend**: `dfrontend/` (static web app, independent deployment)
-- **RAG**: `src/qa/rag_pipeline.py` (Gemini LLM + FAISS search)
-- **Embeddings**: `src/embeddings/` (sentence-transformers primary, Gemini fallback)
+- **RAG**: `src/qa/rag_pipeline.py` (Gemini LLM + FAISS search with configurable context chunks)
+- **Embeddings**: `src/embeddings/` (sentence-transformers primary, Gemini fallback; chunking with overlap)
+- **Config**: `src/config/settings.py` (dotenv-based env vars, no hardcoded values)
 
 ## Key Patterns
-- **Domain Organization**: Data in `data/{domain}/` with json/yaml/faiss subdirs
-- **Async-First**: Use `aiohttp`, not `requests`; all ops async with `await`
-- **Import Strategy**: Absolute from `src/`; run `cd src && python main.py`; set `PYTHONPATH=/path/to/src`
-- **Config**: `src/config/settings.py` via env vars; require `GEMINI_API_KEY`
+- **Domain Organization**: Data in `data/{domain}/` with json/yaml/faiss subdirs; per-domain vector stores
+- **Async-First**: Use `aiohttp`, not `requests`; all ops async with `await`; background tasks for long-running ops
+- **Import Strategy**: Absolute from `src/`; run `cd src && python main.py`; PYTHONPATH set in main.py; fallback imports in endpoints.py
+- **Config**: `src/config/settings.py` via env vars; require `GEMINI_API_KEY`; defaults for all settings
 - **Fallbacks**: Embedding: ST → Gemini; HTTP retries with backoff; dual JSON/YAML storage
+- **Routes**: Added in `DocumentCrawlerAPI._setup_routes()`; use `BackgroundTasks` for crawl/embed; task tracking with IDs
+- **Models**: Pydantic in `src/api/models.py`; schemas in `src/storage/schemas.py`
 
 ## Development Workflows
-- **Run Dev**: `cd src && python main.py`
-- **Prod**: `gunicorn -c gunicorn.conf.py src.main:app`
+- **Run Dev**: `cd src && python main.py` (sets PYTHONPATH, imports from config)
+- **Prod**: `gunicorn -c gunicorn.conf.py src.main:app` (for deployment)
 - **API Dev**: Add routes in `DocumentCrawlerAPI._setup_routes()`; models in `src/api/models.py`; use `BackgroundTasks`
-- **Storage**: Use `StorageManager` for domain folders; saves json+yaml auto
-- **Vectors**: Per-domain `VectorStore`; FAISS with metadata; `MultiDomainVectorStore` for cross-domain
+- **Storage**: Use `StorageManager` for domain folders; saves json+yaml auto; `get_domain_folder()` for paths
+- **Vectors**: Per-domain `VectorStore`; FAISS with metadata; `MultiDomainVectorStore` for cross-domain queries
+- **Testing**: Integration in `test_crawl.py`; imports in `test_imports.py`; API docs at `/docs`
 
 ## Integration Points
-- Crawler → Storage: `DocumentContent` objects persisted per domain
-- Storage → Embeddings: `ContentChunk` with embeddings
-- Embeddings → Vector: FAISS indexes from chunks
-- Vector → RAG: Domain stores loaded for retrieval
+- Crawler → Storage: `DocumentContent` objects persisted per domain via `StorageManager.save_documents()`
+- Storage → Embeddings: `ContentChunk` with embeddings from `EmbeddingService.embed_documents()`
+- Embeddings → Vector: FAISS indexes from chunks via `VectorStore.create_index()`
+- Vector → RAG: Domain stores loaded for retrieval in `RAGPipeline.query()`
+- API → All: Endpoints trigger background tasks; status via `/tasks/{task_id}`
 
 ## Common Gotchas
-- Import errors: Run from `src/` or set PYTHONPATH
-- Missing GEMINI_API_KEY: Fails LLM ops
-- Domain isolation: Separate embed/index per domain
-- Async: Don't mix sync/async; use await
-- Memory: FAISS loads per domain; large domains use RAM
+- Import errors: Run from `src/` or set PYTHONPATH; main.py adds paths automatically
+- Missing GEMINI_API_KEY: Fails LLM ops; set in .env
+- Domain isolation: Separate embed/index per domain; use domain names consistently
+- Async: Don't mix sync/async; use await; background tasks for crawl/embed
+- Memory: FAISS loads per domain; large domains use RAM; chunk size configurable
+- Config: All via env vars; no defaults in code except in settings.py
+- Routes: Decorators in _setup_routes(); not class methods
+- Storage: Dual json/yaml; individual docs in subfolders
 
 ## Testing
 - Integration: `test_crawl.py`
