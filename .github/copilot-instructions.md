@@ -1,135 +1,55 @@
 # AI-Powered Documentation Crawler & Q/A System - Copilot Instructions
 
 ## Architecture Overview
+FastAPI-based RAG system for crawling docs and Q/A. Layered: Crawler → Parser → Storage → Embeddings → Vector Store → RAG Pipeline. Domain-based data isolation with separate FAISS indexes per domain.
 
-This is a FastAPI-based RAG (Retrieval-Augmented Generation) system that crawls documentation websites and provides intelligent Q/A capabilities. The system follows a layered architecture with domain-based data organization.
+## Core Components
+- **Backend**: `src/main.py`, `src/api/endpoints.py` (async REST API with background tasks)
+- **Storage**: `src/storage/` (domain folders: json/yaml/faiss subdirs; dual JSON/YAML persistence)
+- **Frontend**: `dfrontend/` (static web app, independent deployment)
+- **RAG**: `src/qa/rag_pipeline.py` (Gemini LLM + FAISS search with configurable context chunks)
+- **Embeddings**: `src/embeddings/` (sentence-transformers primary, Gemini fallback; chunking with overlap)
+- **Config**: `src/config/settings.py` (dotenv-based env vars, no hardcoded values)
 
-### Core Components
-
-- **FastAPI Backend** (`src/main.py`, `src/api/endpoints.py`): REST API with async background task processing
-- **Domain-Based Storage** (`src/storage/`): Each crawled domain gets isolated JSON/YAML/FAISS storage 
-- **Dual Frontend**: Static web UI in `dfrontend/` + FastAPI serves API endpoints
-- **RAG Pipeline** (`src/qa/rag_pipeline.py`): Gemini LLM + FAISS vector search for Q/A
-- **Embedding Strategy** (`src/embeddings/`): sentence-transformers primary, Gemini fallback
-
-### Data Flow Pattern
-
-```
-URL → WebCrawler → ContentParser → StorageManager → EmbeddingService → VectorStore → RAGPipeline
-```
-
-## Key Patterns & Conventions
-
-### 1. Domain-Based Organization
-All data is organized by domain in `data/{domain-name}/`:
-```
-data/docs-livekit-io/
-├── json/          # Machine-readable storage
-├── yaml/          # Human-readable storage  
-└── faiss/         # Vector indexes + metadata
-```
-
-### 2. Async-First Architecture
-- All major operations are async: crawling, embedding, querying
-- Background task tracking via `DocumentCrawlerAPI.background_tasks`
-- Use `aiohttp` for web requests, not `requests`
-
-### 3. Import Path Strategy
-The codebase uses absolute imports from `src/`. Always ensure:
-- Run from `src/` directory or set `PYTHONPATH=/path/to/src`
-- Main entry: `python src/main.py` or `cd src && python main.py`
-- Import pattern: `from config.settings import settings` (not relative imports)
-
-### 4. Configuration Management
-Settings centralized in `src/config/settings.py` using environment variables:
-- **Required**: `GEMINI_API_KEY` for LLM operations
-- **Key Settings**: `MAX_CONCURRENT_REQUESTS`, `CHUNK_SIZE`, `LOG_LEVEL`
-- Use `settings.PROPERTY_NAME` throughout codebase
-
-### 5. Error Handling & Fallbacks
-- Embedding: sentence-transformers → Gemini fallback 
-- HTTP: Retry logic with exponential backoff in `WebCrawler`
-- Storage: Both JSON and YAML formats for redundancy
-- Always check `try/except ImportError` blocks for module loading
+## Key Patterns
+- **Domain Organization**: Data in `src/data/{domain}/` with json/yaml/faiss subdirs; per-domain vector stores
+- **Multi-Domain Queries**: Frontend supports checkbox selection; backend uses `MultiDomainVectorStore` for cross-domain search
+- **Async-First**: Use `aiohttp`, not `requests`; all ops async with `await`; background tasks for long-running ops
+- **Import Strategy**: Absolute from `src/`; `run_server.py` handles PYTHONPATH; fallback imports in endpoints.py
+- **Config**: `src/config/settings.py` via env vars; require `GEMINI_API_KEY`; server defaults to port 5002
+- **Fallbacks**: Embedding: sentence-transformers → Gemini; HTTP retries with backoff; dual JSON/YAML storage
+- **Routes**: Added in `DocumentCrawlerAPI._setup_routes()`; use `BackgroundTasks` for crawl/embed; task tracking with IDs
+- **Models**: Pydantic in `src/api/models.py`; schemas in `src/storage/schemas.py`
 
 ## Development Workflows
+- **Run Dev**: `python run_server.py` (handles PYTHONPATH, venv activation, runs on port 5002)
+- **Quick Deploy**: `.\deploy.bat` (starts backend + frontend servers with proper venv setup)
+- **Frontend**: `dfrontend/` serves static files; `dfrontend/js/config.js` for API endpoints
+- **API Dev**: Add routes in `DocumentCrawlerAPI._setup_routes()`; models in `src/api/models.py`; use `BackgroundTasks`
+- **Storage**: Use `StorageManager` for domain folders; saves json+yaml auto; `get_domain_folder()` for paths
+- **Vectors**: Per-domain `VectorStore`; FAISS with metadata; `MultiDomainVectorStore` for cross-domain queries
+- **Testing**: Integration in `test_crawl.py`; imports in `test_imports.py`; API docs at `/docs`
 
-### Running the System
-```bash
-# Development server
-cd src && python main.py
-
-# Production (uses gunicorn.conf.py)
-gunicorn -c gunicorn.conf.py src.main:app
-```
-
-### API Development Pattern
-New endpoints in `src/api/endpoints.py` follow this pattern:
-1. Add route to `DocumentCrawlerAPI._setup_routes()`
-2. Create request/response models in `src/api/models.py`
-3. Use `BackgroundTasks` for long-running operations
-4. Return task IDs for status tracking
-
-### Storage Operations
-Always use `StorageManager` for file operations:
-- `get_domain_folder()` for path resolution
-- Saves both JSON and YAML automatically
-- Individual documents saved in `individual/` subdirectories
-
-### Vector Operations
-- Each domain gets its own `VectorStore` instance
-- FAISS indexes stored with metadata in domain folders
-- Use `MultiDomainVectorStore` for cross-domain queries
-
-## Critical Integration Points
-
-### 1. Crawler → Storage
-`WebCrawler.crawl_domain()` returns `DocumentContent` objects that `StorageManager` persists in domain-specific folders.
-
-### 2. Storage → Embeddings  
-`EmbeddingService.embed_documents()` takes `DocumentContent` list and returns `ContentChunk` objects with embeddings.
-
-### 3. Embeddings → Vector Store
-`VectorStore.create_index()` builds FAISS indexes from `ContentChunk` objects, storing metadata separately.
-
-### 4. Vector Store → RAG
-`RAGPipeline` loads domain-specific vector stores and uses them for retrieval during Q/A.
-
-## Frontend Integration
-
-The `dfrontend/` contains a standalone static web app:
-- **API Communication**: Uses `js/api.js` to call FastAPI endpoints
-- **Configuration**: Backend URL set in `js/config.js`
-- **Deployment**: Completely independent from backend (static hosting)
-
-## Deployment Considerations
-
-### Environment Setup
-- **Development**: Run from `src/` with `.env` file
-- **Production**: Uses `gunicorn` with Uvicorn workers
-- **Azure**: Container Apps deployment with Blob Storage integration
-
-### Data Persistence
-- **Local**: `data/` directory with domain folders
-- **Azure**: Blob Storage integration via `src/storage/azure_blob.py`
-- **Vector Indexes**: FAISS files persisted alongside metadata
-
-### Scaling Points
-- Concurrent crawling: `MAX_CONCURRENT_REQUESTS` setting
-- Memory usage: FAISS indexes loaded per domain
-- Background tasks: Tracked in-memory (consider Redis for production)
+## Integration Points
+- Crawler → Storage: `DocumentContent` objects persisted per domain via `StorageManager.save_documents()`
+- Storage → Embeddings: `ContentChunk` with embeddings from `EmbeddingService.embed_documents()`
+- Embeddings → Vector: FAISS indexes from chunks via `VectorStore.create_index()`
+- Vector → RAG: Domain stores loaded for retrieval in `RAGPipeline.query()`
+- API → All: Endpoints trigger background tasks; status via `/tasks/{task_id}`
 
 ## Common Gotchas
+- Import errors: Use `python run_server.py`, not direct `main.py`; run_server.py sets PYTHONPATH automatically
+- Missing GEMINI_API_KEY: Fails LLM ops; set in .env or venv activation
+- Domain filtering: Embed dropdown shows domains WITHOUT embeddings; query shows domains WITH embeddings
+- URL field mapping: Multi-domain results check multiple field names (`url`, `source_url`, `link`, `page_url`)
+- Async: Don't mix sync/async; use await; background tasks for crawl/embed
+- Memory: FAISS loads per domain; large domains use RAM; chunk size configurable
+- Config: All via env vars; server runs on port 5002, frontend on 3000
+- Routes: Decorators in _setup_routes(); not class methods
+- Storage: Dual json/yaml; individual docs in subfolders with domain isolation
 
-1. **Import Errors**: Always run from `src/` or set `PYTHONPATH`
-2. **Missing API Keys**: Gemini operations fail without `GEMINI_API_KEY`
-3. **Domain Isolation**: Each domain needs separate embedding/indexing workflow
-4. **Async Context**: Most operations require `await` - don't mix sync/async
-5. **FAISS Memory**: Large domains can consume significant RAM for vector indexes
-
-## Testing Patterns
-
-- **Integration Tests**: Use `test_crawl.py` for end-to-end crawler testing
-- **Import Validation**: `test_imports.py` validates all module dependencies
-- **API Testing**: FastAPI auto-generates OpenAPI docs at `/docs`
-- **Local Development**: Use `dfrontend/test-copy.html` for frontend testing
+## Testing
+- Integration: `test_crawl.py`
+- Imports: `test_imports.py`
+- API: `/docs` for OpenAPI
+- Frontend: `dfrontend/test-copy.html`
