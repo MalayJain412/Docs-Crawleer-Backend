@@ -173,15 +173,8 @@ dfrontend/build/
 package-lock.json
 yarn.lock
 
-test_crawl.py
-test_imports.py
-project_structure.md
-micro_architecture_system.md
-micro_architecture_system.pdf
 copy_utils.py
 dfrontend/
 all_code_snippets.txt
-doc_crawler_plan (1).md
-
 
 deploy-acr.yml

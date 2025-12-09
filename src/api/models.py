@@ -1,7 +1,7 @@
 """Pydantic models for FastAPI endpoints."""
 
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, validator
 
 
 class CrawlRequest(BaseModel):
@@ -38,11 +38,37 @@ class EmbedResponse(BaseModel):
     
 
 class QueryRequest(BaseModel):
-    """Request model for Q/A queries."""
+    """Request model for single-domain Q/A queries."""
     query: str = Field(description="Natural language query")
     domain: str = Field(description="Domain to search in")
     top_k: int = Field(default=5, ge=1, le=20, description="Number of relevant chunks to retrieve")
     include_context: bool = Field(default=True, description="Whether to use LLM for answer generation")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "query": "How to configure authentication?",
+                "domain": "docs-site-1",
+                "top_k": 5
+            }
+        }
+
+
+class MultiDomainQueryRequest(BaseModel):
+    """Request model for multi-domain Q/A queries."""
+    query: str = Field(description="Natural language query")
+    domains: List[str] = Field(description="Multiple domains to search", min_items=1, max_items=10)
+    top_k: int = Field(default=5, ge=1, le=50, description="Number of relevant chunks to retrieve")
+    include_context: bool = Field(default=True, description="Whether to use LLM for answer generation")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "query": "How to configure authentication?",
+                "domains": ["docs-site-1", "docs-site-2"],
+                "top_k": 10
+            }
+        }
     
 
 class QueryResponse(BaseModel):
@@ -85,3 +111,33 @@ class ErrorResponse(BaseModel):
     error: str
     details: Optional[str] = None
     error_code: Optional[str] = None
+
+
+class DomainsValidationRequest(BaseModel):
+    """Request model for domain validation."""
+    domains: List[str] = Field(description="List of domains to validate")
+
+
+class DomainsValidationResponse(BaseModel):
+    """Response model for domain validation."""
+    domain_status: Dict[str, bool] = Field(description="Status of each domain")
+    valid_domains: List[str] = Field(description="List of valid domains")
+    invalid_domains: List[str] = Field(description="List of invalid domains")
+
+
+class AvailableDomainsResponse(BaseModel):
+    """Response model for available domains."""
+    domains: List[str] = Field(description="List of available domains")
+    total_count: int = Field(description="Total number of domains")
+
+
+class MultiDomainQueryResponse(BaseModel):
+    """Response model for multi-domain queries."""
+    query: str
+    answer: str
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    domains_searched: List[str] = Field(default_factory=list)
+    total_results: int = 0
+    confidence: Optional[float] = None
+    processing_time: Optional[float] = None
+    domain_status: Optional[Dict[str, bool]] = None

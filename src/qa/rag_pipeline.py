@@ -10,6 +10,7 @@ try:
     from storage.schemas import QueryRequest, QueryResponse
     from embeddings.embedding_service import EmbeddingService
     from embeddings.vector_store import VectorStore
+    from embeddings.multi_domain_vector_store import MultiDomainVectorStore, DomainSearchResult
 except ImportError:
     # Fallback for direct execution
     import sys
@@ -21,6 +22,7 @@ except ImportError:
     from storage.schemas import QueryRequest, QueryResponse
     from embeddings.embedding_service import EmbeddingService
     from embeddings.vector_store import VectorStore
+    from embeddings.multi_domain_vector_store import MultiDomainVectorStore, DomainSearchResult
 
 
 class RAGPipeline:
@@ -31,6 +33,7 @@ class RAGPipeline:
         self.logger = default_logger
         self.embedding_service = EmbeddingService()
         self.vector_stores: Dict[str, VectorStore] = {}
+        self.multi_domain_store = MultiDomainVectorStore(max_concurrent_domains=5)
         self._llm_client = None
         
     async def initialize(self):
@@ -41,6 +44,9 @@ class RAGPipeline:
             
             # Initialize LLM client
             self._llm_client = await self._init_llm_client()
+            
+            # Initialize multi-domain store semaphore (ensure it's created in correct event loop)
+            self.multi_domain_store = MultiDomainVectorStore(max_concurrent_domains=5)
             
             self.logger.info("RAG pipeline initialized successfully")
             
@@ -56,7 +62,7 @@ class RAGPipeline:
                 genai.configure(api_key=settings.GEMINI_API_KEY)
                 
                 # Test the model with Gemini Flash
-                model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                model = genai.GenerativeModel(settings.GEMINI_LLM_MODEL)
                 test_response = model.generate_content("Hello")
                 
                 self.logger.info("Initialized Gemini LLM client")
@@ -199,74 +205,96 @@ class RAGPipeline:
 
 **IMPORTANT: Your response must be in valid Markdown format that will be parsed and displayed in a web browser.**
 
-RULES — follow these exactly:
-1. **Start with a 1–3 sentence TL;DR** that states the recommended outcome and any major assumptions.
-2. **Use clear sectioning with proper Markdown headers:** 
-   - Use `# Header` for top-level sections 
-   - Use `## Subheader` for sub-sections
-   - Use `### Sub-subheader` for tertiary sections
-   - Keep headings short and scannable
-   - Use emojis sparingly to improve readability (max 3 per answer)
-3. **Always prioritize the provided Context.** When you use information from `context`, cite it inline exactly like this: `(Source: [Title])`. If you must recommend something *not* present in `context`, explicitly mark it as an assumption (e.g. `**ASSUMPTION:**`) and explain why you made it.
-4. **Include the following sections (in this order) for setup/how-to queries:**
-   - `# TL;DR` — 1–3 sentence summary.
-   - `# Overview` — short architectural summary and the goal.
-   - `# Prerequisites` — exact OS / runtime / versions / accounts / env vars / keys required.
-   - `# Architecture` — brief ASCII diagram + explanation of data/audio flow.
-   - `# Step-by-step Implementation` — numbered steps with copy-paste commands and full file contents where relevant.
-   - `# Example (Minimal, runnable)` — one small end-to-end example that can be run locally.
-   - `# Configuration & Secrets` — exact `.env` keys, security notes.
-   - `# Advanced / Production Notes` — scaling, monitoring, HA, cost and latency considerations.
-   - `# Troubleshooting` — common failures and quick fixes.
-   - `# Next steps / Further improvements` — 3–6 concrete follow-ups.
-   - `# Checklist` — a compact actionable checklist.
-   - `# Copy & Paste` — minimal commands/files for proof-of-concept.
-   - `# Verification` — 3 quick checks to confirm success.
-5. **Markdown Code formatting rules:**
-   - Use fenced code blocks with language identifiers: \`\`\`bash\`\`\`, \`\`\`python\`\`\`, \`\`\`yaml\`\`\`, etc.
-   - Use \`inline code\` for commands, filenames, and variables
-   - Provide **complete** files (not fragments) for any file you tell the user to create
-   - For every runnable example include exact installation and run commands
-6. **Markdown formatting rules:**
-   - Use **bold** for emphasis and important terms
-   - Use *italic* for secondary emphasis  
-   - Use `> blockquotes` for important notes or warnings
-   - Use `- bullet points` and `1. numbered lists` appropriately
-   - Use `| tables |` when presenting structured data
-   - Use `---` for section breaks when needed
-7. **Citations:**
-   - Cite the **most important** 3–5 claims with `(Source: [Title])` from the provided `context`
-   - Place citations at the end of sentences where claims appear
-   - If you quote phrases from `context`, keep quotes ≤ 25 words
-8. **Structure and completeness:**
-   - Always end with a `# Copy & Paste` section containing minimal runnable commands
-   - Always include a `# Verification` section with 3 quick success checks
-   - Use clear, scannable headings throughout
-9. **Tone & style:**
-   - Professional, helpful, concise but thorough
-   - Avoid generic filler - provide concrete recommendations and defaults
-   - Use emojis strategically for improved readability (max 3 total)
+======================================================================
+NEW RULE — Documentation vs Suggestions:
+- For each major section, explicitly separate:
+  1. **Logic from Documentation** → Facts, instructions, or explanations found in `context` (with citations).
+  2. **Next-step Suggestions** → Actionable recommendations, extensions, or optimizations *based on the documentation* but not literally in it.
+- Mark clearly using headings:
+  - `### Logic from Documentation`
+  - `### Next-step Suggestions`
 
+======================================================================
+RULES — Retrieval & Context:
+1. Use ONLY the provided `context`. Treat it as ground truth.
+2. Always cite inline like this: (Source: [Title]) after any claim.
+3. If a query cannot be answered directly, provide:
+   - A list of the closest relevant topics or sections (with citations).
+   - Explicitly state: "**No direct answer found. Here are related areas you may explore.**"
+4. Prioritize **page-level context** and keep related chunks grouped together.
+5. Do not hallucinate APIs, parameters, or commands. If something is missing, say "**ASSUMPTION:**" and explain.
+6. If retrieval confidence < 0.5: Return related **topics with their doc titles and URLs**, instead of making up an answer.
+7. If retrieval yields nothing: Say "**No relevant context retrieved.** Please refine your query or check documentation coverage."
+
+======================================================================
+RULES — Response Structure (for engineers):
+Always follow this section order for setup/how-to style queries:
+
+- `# TL;DR` — 1–3 sentence summary.
+- `# Overview`  
+   - `### Logic from Documentation`  
+   - `### Next-step Suggestions`
+- `# Prerequisites`
+   - `### Logic from Documentation`
+   - `### Next-step Suggestions`
+- `# Architecture`
+   - `### Logic from Documentation`
+   - `### Next-step Suggestions`
+- `# Step-by-step Implementation`
+   - `### Logic from Documentation`
+   - `### Next-step Suggestions`
+- `# Example (Minimal, runnable)`
+- `# Configuration & Secrets`
+- `# Advanced / Production Notes`
+- `# Troubleshooting`
+- `# Next steps / Further improvements`
+- `# Checklist`
+- `# Copy & Paste`
+- `# Verification`
+- `# Sources`
+
+======================================================================
+RULES — Code & Markdown:
+- Use fenced code blocks with language identifiers (`bash`, `python`, `yaml`, etc.).
+- Use `inline code` for commands, filenames, and variables.
+- Provide **complete files** (not fragments) for any file you tell the user to create.
+- For every runnable example, include exact installation and run commands.
+- Use **bold** for emphasis, *italic* for secondary emphasis, and blockquotes for notes.
+- Max 3 emojis for readability.
+
+======================================================================
+RULES — Multi-domain Context:
+1. Always attribute facts to their originating document, e.g., (Source: [Kubernetes Docs]).
+2. If multiple domains are relevant, group content under a new section:
+   - `# Domain-specific Notes`
+     - `## [Domain/Doc Title]`
+       - `### Logic from Documentation`
+       - `### Next-step Suggestions`
+3. If instructions from different domains conflict, list both sets with their sources, then recommend a safe default under "Next-step Suggestions".
+
+======================================================================
 Context from Documentation:
 {context}
 
 Query:
 {query}
 
+======================================================================
 **OUTPUT REQUIREMENTS:**
 - Respond ONLY in valid Markdown format
-- Follow the complete structure outlined above
+- Explicitly separate documentation facts and suggestions under the headings above
 - Ensure all code blocks have proper language tags
 - Make the response copy-pasteable and immediately actionable
 - End with both `# Copy & Paste` and `# Verification` sections
+- If no answer possible, fallback to related topics mode as per Retrieval Rules.
 
 ---
-
-**Comprehensive Technical Answer:**"""
+**Comprehensive Technical Answer:**
+"""
             
             # Generate response with Gemini Flash - configured for comprehensive responses
             model = genai.GenerativeModel(
-                'gemini-1.5-flash-latest',
+                settings.GEMINI_LLM_MODEL,
                 generation_config=genai.types.GenerationConfig(
                     temperature=settings.LLM_TEMPERATURE,
                     max_output_tokens=settings.LLM_MAX_TOKENS,
@@ -581,6 +609,161 @@ Query:
                 results.append(response)
         
         return results
+
+    async def answer_query_multi_domain(
+        self, 
+        query: str, 
+        domains: List[str], 
+        top_k: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Answer query using multiple domain sources.
+        
+        Args:
+            query: User query
+            domains: List of domains to search
+            top_k: Number of top results to use
+            
+        Returns:
+            Answer with sources and metadata
+        """
+        try:
+            self.logger.info(f"Starting multi-domain query for domains: {domains}")
+            
+            # Validate domains first
+            self.logger.debug("Validating domains...")
+            domain_status = await self.multi_domain_store.validate_domains(domains)
+            valid_domains = [d for d, status in domain_status.items() if status]
+            
+            self.logger.info(f"Domain validation results: {domain_status}")
+            self.logger.info(f"Valid domains: {valid_domains}")
+            
+            if not valid_domains:
+                return {
+                    "answer": "No domains with embeddings found. Please ensure the selected domains have been crawled and embedded.",
+                    "sources": [],
+                    "error": "No valid domains found with FAISS indexes",
+                    "domain_status": domain_status
+                }
+            
+            # Generate query embedding
+            self.logger.debug("Generating query embedding...")
+            query_embeddings = await self.embedding_service.generate_embeddings([query])
+            if not query_embeddings:
+                return {
+                    "answer": self._create_fallback_answer([]),
+                    "sources": [],
+                    "error": "Failed to generate query embedding"
+                }
+            query_embedding = query_embeddings[0]
+            self.logger.debug(f"Generated embedding of dimension: {len(query_embedding)}")
+            
+            # Search across domains
+            self.logger.debug(f"Searching across {len(valid_domains)} domains...")
+            search_results = await self.multi_domain_store.search_domains(
+                domains=valid_domains,
+                query_embedding=query_embedding,
+                top_k=top_k
+            )
+            
+            self.logger.info(f"Found {len(search_results)} search results across domains")
+            
+            if not search_results:
+                return {
+                    "answer": self._create_fallback_answer([]),
+                    "sources": [],
+                    "note": "No relevant documents found across domains",
+                    "domains_searched": valid_domains
+                }
+            
+            # Prepare context for LLM
+            context_docs = []
+            for result in search_results:
+                # Fix URL field mapping - check multiple possible field names
+                source_url = result.source_url
+                if not source_url or source_url == 'undefined':
+                    # Try alternative field names from metadata
+                    metadata = result.metadata or {}
+                    source_url = (
+                        metadata.get('url') or 
+                        metadata.get('source_url') or 
+                        metadata.get('link') or 
+                        metadata.get('page_url') or 
+                        metadata.get('original_url') or
+                        ''
+                    )
+                
+                context_doc = {
+                    "content": result.content,
+                    "source_url": source_url,
+                    "domain": result.domain,
+                    "similarity_score": result.normalized_score,
+                    "metadata": result.metadata
+                }
+                context_docs.append(context_doc)
+            
+            self.logger.debug(f"Prepared {len(context_docs)} context documents for LLM")
+            
+            # Generate answer
+            self.logger.debug("Generating LLM answer...")
+            answer = await self._generate_llm_answer(query, context_docs)
+            
+            # Prepare sources
+            sources = []
+            for result in search_results:
+                # Fix URL field mapping for sources too
+                source_url = result.source_url
+                if not source_url or source_url == 'undefined':
+                    # Try alternative field names from metadata
+                    metadata = result.metadata or {}
+                    source_url = (
+                        metadata.get('url') or 
+                        metadata.get('source_url') or 
+                        metadata.get('link') or 
+                        metadata.get('page_url') or 
+                        metadata.get('original_url') or
+                        'No URL available'
+                    )
+                
+                source = {
+                    "domain": result.domain,
+                    "chunk_id": result.chunk_id,
+                    "source_url": source_url,
+                    "score": result.normalized_score,
+                    "chunk_index": result.chunk_index,
+                    "title": result.metadata.get('title', 'Untitled') if result.metadata else 'Untitled',
+                    "snippet": result.content[:200] + "..." if len(result.content) > 200 else result.content
+                }
+                sources.append(source)
+            
+            self.logger.info(f"Multi-domain query completed successfully with {len(sources)} sources")
+            
+            return {
+                "answer": answer,
+                "sources": sources,
+                "domains_searched": valid_domains,
+                "total_results": len(search_results),
+                "query": query,
+                "processing_info": {
+                    "domains_requested": domains,
+                    "domains_validated": domain_status,
+                    "domains_searched": valid_domains,
+                    "results_per_domain": {
+                        domain: len([r for r in search_results if r.domain == domain])
+                        for domain in valid_domains
+                    }
+                }
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Multi-domain query failed: {e}", exc_info=True)
+            return {
+                "answer": self._create_fallback_answer([]),
+                "sources": [],
+                "error": str(e),
+                "query": query,
+                "domains_requested": domains
+            }
     
     def get_available_domains(self) -> List[str]:
         """Get list of available domains for querying."""

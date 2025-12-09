@@ -21,8 +21,9 @@ try:
     from qa.rag_pipeline import RAGPipeline
     from api.models import (
         CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
-        QueryRequest, QueryResponse, DomainInfo, StatusResponse,
-        HealthResponse, ErrorResponse
+        QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
+        HealthResponse, ErrorResponse, DomainsValidationRequest,
+        DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
     )
 except ImportError:
     # Fallback for direct execution
@@ -40,8 +41,9 @@ except ImportError:
     from qa.rag_pipeline import RAGPipeline
     from api.models import (
         CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
-        QueryRequest, QueryResponse, DomainInfo, StatusResponse,
-        HealthResponse, ErrorResponse
+        QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
+        HealthResponse, ErrorResponse, DomainsValidationRequest,
+        DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
     )
 
 
@@ -161,8 +163,25 @@ class DocumentCrawlerAPI:
                     request.domain_name
                 )
                 
+                # Generate domain name and unique task ID with timestamp
+                domain = request.base_domain or URLUtils.extract_domain_name(request.url)
+                domain_name_safe = domain.replace('.', '-').replace('_', '-').lower()  # Safe for task ID
+                task_id = f"crawl_{domain_name_safe}_{int(time.time() * 1000)}"
+                
+                # Initialize task with complete structure
+                self.background_tasks[task_id] = {
+                    "task_id": task_id,
+                    "status": "started",
+                    "message": f"Initializing crawl for {request.url}",
+                    "progress": 0,
+                    "domain": domain,
+                    "start_time": time.time(),
+                    "url": request.url,
+                    "end_time": None,
+                    "error": None
+                }
+                
                 # Start crawling in background
-                task_id = f"crawl_{int(time.time())}"
                 background_tasks.add_task(
                     self._crawl_task,
                     task_id,
@@ -171,16 +190,6 @@ class DocumentCrawlerAPI:
                     request.max_depth,
                     domain_folder
                 )
-                
-                # Track task
-                domain = request.base_domain or URLUtils.extract_domain_name(request.url)
-                self.background_tasks[task_id] = {
-                    "type": "crawl",
-                    "status": "started",
-                    "domain": domain,
-                    "start_time": time.time(),
-                    "url": request.url
-                }
                 
                 return CrawlResponse(
                     success=True,
@@ -210,22 +219,29 @@ class DocumentCrawlerAPI:
                 
                 domain_folder = domain_info['domain_folder']
                 
+                # Generate unique task ID with domain name
+                domain_name_safe = request.domain.replace('.', '-').replace('_', '-').lower()  # Safe for task ID
+                task_id = f"embed_{domain_name_safe}_{int(time.time() * 1000)}"
+                
+                # Initialize task with complete structure
+                self.background_tasks[task_id] = {
+                    "task_id": task_id,
+                    "status": "started",
+                    "message": f"Initializing embedding generation for {request.domain}",
+                    "progress": 0,
+                    "domain": request.domain,
+                    "start_time": time.time(),
+                    "end_time": None,
+                    "error": None
+                }
+                
                 # Start embedding in background
-                task_id = f"embed_{int(time.time())}"
                 background_tasks.add_task(
                     self._embed_task,
                     task_id,
                     request.domain,
                     domain_folder
                 )
-                
-                # Track task
-                self.background_tasks[task_id] = {
-                    "type": "embed",
-                    "status": "started",
-                    "domain": request.domain,
-                    "start_time": time.time()
-                }
                 
                 return EmbedResponse(
                     success=True,
@@ -288,6 +304,127 @@ class DocumentCrawlerAPI:
                 self.logger.error(f"Query failed for domain '{request.domain}': {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
         
+        @self.app.post("/query-multi-domain", response_model=MultiDomainQueryResponse)
+        async def query_multi_domain(request: MultiDomainQueryRequest):
+            """Query across multiple domains simultaneously."""
+            start_time = time.time()
+            
+            try:
+                # Get domains list directly (no normalization needed)
+                domains = request.domains
+                
+                # Validate domains list
+                if len(domains) > 10:  # Reasonable limit
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Too many domains requested (max 10)"
+                    )
+                
+                # Log the query for monitoring
+                self.logger.info(f"Processing multi-domain query for domains {domains}: {request.query[:100]}{'...' if len(request.query) > 100 else ''}")
+                
+                # Call RAG pipeline
+                result = await self.rag_pipeline.answer_query_multi_domain(
+                    query=request.query,
+                    domains=domains,
+                    top_k=request.top_k
+                )
+                
+                # Log response metrics
+                processing_time = time.time() - start_time
+                self.logger.info(f"Multi-domain query completed for domains {domains} in {processing_time:.3f}s")
+                
+                return MultiDomainQueryResponse(
+                    query=request.query,
+                    answer=result.get("answer", ""),
+                    sources=result.get("sources", []),
+                    domains_searched=result.get("domains_searched", domains),
+                    total_results=result.get("total_results", 0),
+                    processing_time=processing_time,
+                    domain_status=result.get("domain_status")
+                )
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                self.logger.error(f"Multi-domain query failed: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Multi-domain query processing failed: {str(e)}")
+        
+        @self.app.get("/domains/available", response_model=AvailableDomainsResponse)
+        async def get_available_domains():
+            """Get list of all available domains with FAISS indexes."""
+            try:
+                available_domains = []
+                # Use the same data directory as StorageManager
+                data_dir = Path(settings.DATA_DIR)
+                
+                if data_dir.exists():
+                    for domain_path in data_dir.iterdir():
+                        if domain_path.is_dir() and domain_path.name != 'logs':
+                            faiss_dir = domain_path / "faiss"
+                            index_file = faiss_dir / "index.faiss"
+                            
+                            if index_file.exists():
+                                available_domains.append(domain_path.name)
+                
+                # Sort domains alphabetically
+                available_domains.sort()
+                
+                return AvailableDomainsResponse(
+                    domains=available_domains,
+                    total_count=len(available_domains)
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Failed to get available domains: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/domains/validate", response_model=DomainsValidationResponse)
+        async def validate_domains(request: DomainsValidationRequest):
+            """Validate that requested domains have available FAISS indexes."""
+            try:
+                if not request.domains:
+                    return DomainsValidationResponse(
+                        domain_status={},
+                        valid_domains=[],
+                        invalid_domains=[]
+                    )
+                
+                domain_status = {}
+                valid_domains = []
+                invalid_domains = []
+                
+                for domain in request.domains:
+                    try:
+                        # Construct path directly to match the data structure
+                        data_dir = Path(settings.DATA_DIR)
+                        domain_folder = data_dir / domain
+                        faiss_dir = domain_folder / "faiss"
+                        index_file = faiss_dir / "index.faiss"
+                        
+                        is_valid = index_file.exists()
+                        domain_status[domain] = is_valid
+                        
+                        if is_valid:
+                            valid_domains.append(domain)
+                        else:
+                            invalid_domains.append(domain)
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Error validating domain {domain}: {e}")
+                        domain_status[domain] = False
+                        invalid_domains.append(domain)
+                
+                return DomainsValidationResponse(
+                    domain_status=domain_status,
+                    valid_domains=valid_domains,
+                    invalid_domains=invalid_domains
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Domain validation failed: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.get("/domains", response_model=List[DomainInfo])
         async def list_domains():
             """List all available domains with their information."""
@@ -359,6 +496,26 @@ class DocumentCrawlerAPI:
             
             return self.background_tasks[task_id]
         
+        @self.app.get("/tasks")
+        async def get_all_tasks():
+            """Get all background tasks."""
+            try:
+                # Convert the tasks dict to a list and add task_id to each task
+                tasks_list = []
+                for task_id, task_data in self.background_tasks.items():
+                    task_with_id = task_data.copy()
+                    task_with_id["task_id"] = task_id
+                    tasks_list.append(task_with_id)
+                
+                # Sort by start_time (most recent first)
+                tasks_list.sort(key=lambda x: x.get("start_time", 0), reverse=True)
+                
+                return tasks_list
+                
+            except Exception as e:
+                self.logger.error(f"Failed to get all tasks: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
         @self.app.get("/status")
         async def get_system_status():
             """Get system status and statistics."""
@@ -399,12 +556,43 @@ class DocumentCrawlerAPI:
         try:
             self.logger.info(f"Starting crawl task {task_id} for {url}")
             
-            # Update task status
-            self.background_tasks[task_id]["status"] = "crawling"
+            # Update task status (domain stays static like start_time)
+            self.background_tasks[task_id].update({
+                "task_id": task_id,  # Ensure task_id is always present
+                "status": "crawling",
+                "message": f"Starting to crawl documentation from {url}",  # Always provide a message
+                "progress": 10
+            })
             
-            # Perform crawling
+            # Create progress callback
+            async def progress_callback(progress_data):
+                successful = progress_data['successful_pages']
+                total = progress_data['total_processed']
+                remaining = progress_data['queue_remaining']
+                
+                # Calculate progress percentage (estimate based on discovered pages so far)
+                # We'll use a heuristic: 90% for crawling, 10% for initial setup
+                estimated_total = max(total + remaining, 1)  # Avoid division by zero
+                crawl_progress = min(90, int((total / estimated_total) * 90))
+                final_progress = 10 + crawl_progress  # 10% for initial setup + crawl progress
+                
+                # Update task with real-time progress (domain stays static)
+                self.background_tasks[task_id].update({
+                    "task_id": task_id,  # Ensure task_id is always present
+                    "message": f"Processing pages... ({successful} successful, {remaining} in queue)",
+                    "progress": final_progress
+                })
+            
+            # Perform crawling with progress updates
             async with WebCrawler() as crawler:
-                session = await crawler.crawl_domain(url, base_domain, max_depth)
+                session = await crawler.crawl_domain(url, base_domain, max_depth, progress_callback)
+                
+                # Update with crawling results (domain stays static)
+                self.background_tasks[task_id].update({
+                    "task_id": task_id,  # Ensure task_id is always present
+                    "message": f"Crawling complete. Found {session.successful_pages} pages",
+                    "progress": 95
+                })
                 
                 # Save results
                 self.storage_manager.save_crawl_session(session, domain_folder)
@@ -413,9 +601,12 @@ class DocumentCrawlerAPI:
                     domain_folder
                 )
                 
-                # Update task status
+                # Final completion status (domain stays static)
                 self.background_tasks[task_id].update({
+                    "task_id": task_id,  # Ensure task_id is always present
                     "status": "completed",
+                    "message": f"Successfully crawled {session.successful_pages} pages",
+                    "progress": 100,
                     "end_time": time.time(),
                     "results": {
                         "total_pages": session.total_pages,
@@ -431,7 +622,10 @@ class DocumentCrawlerAPI:
         except Exception as e:
             self.logger.error(f"Crawl task {task_id} failed: {e}")
             self.background_tasks[task_id].update({
+                "task_id": task_id,
                 "status": "failed",
+                "message": f"Crawling failed: {str(e)}",
+                "progress": 0,
                 "end_time": time.time(),
                 "error": str(e)
             })
@@ -441,19 +635,70 @@ class DocumentCrawlerAPI:
         try:
             self.logger.info(f"Starting embed task {task_id} for domain {domain}")
             
-            # Update task status
-            self.background_tasks[task_id]["status"] = "processing"
+            # Update task status (domain stays static like start_time)
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "processing",
+                "message": f"Loading documents for {domain}",
+                "progress": 5
+            })
             
             # Load documents
             documents = self.storage_manager.load_documents(domain_folder, "json")
             if not documents:
                 raise Exception("No documents found for embedding")
             
-            # Generate embeddings
+            # Update progress (domain stays static)
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "message": f"Loaded {len(documents)} documents. Initializing embedding service...",
+                "progress": 10
+            })
+            
+            # Initialize embedding service
             embedding_service = EmbeddingService()
             await embedding_service.initialize()
             
-            chunks = await embedding_service.embed_documents(documents)
+            # Create progress callback for embedding
+            async def embedding_progress_callback(progress_data):
+                stage = progress_data['stage']
+                
+                if stage == 'chunking':
+                    docs_processed = progress_data['documents_processed']
+                    total_docs = progress_data['total_documents']
+                    chunks_created = progress_data['chunks_created']
+                    
+                    # Chunking gets 10-30% of progress
+                    chunk_progress = int(10 + (docs_processed / total_docs) * 20)
+                    
+                    self.background_tasks[task_id].update({
+                        "task_id": task_id,
+                        "message": f"Chunking documents... ({docs_processed}/{total_docs} docs, {chunks_created} chunks)",
+                        "progress": chunk_progress
+                    })
+                    
+                elif stage == 'embedding':
+                    chunks_processed = progress_data['chunks_processed']
+                    total_chunks = progress_data['total_chunks']
+                    
+                    # Embedding gets 30-80% of progress
+                    embed_progress = int(30 + (chunks_processed / total_chunks) * 50)
+                    
+                    self.background_tasks[task_id].update({
+                        "task_id": task_id,
+                        "message": f"Generating embeddings... ({chunks_processed}/{total_chunks} chunks)",
+                        "progress": embed_progress
+                    })
+                    
+                elif stage == 'completed':
+                    self.background_tasks[task_id].update({
+                        "task_id": task_id,
+                        "message": f"Embeddings generated. Creating vector index...",
+                        "progress": 85
+                    })
+            
+            # Generate embeddings with progress tracking
+            chunks = await embedding_service.embed_documents(documents, embedding_progress_callback)
             
             # Create vector store
             vector_store = VectorStore(domain, domain_folder)
@@ -465,9 +710,12 @@ class DocumentCrawlerAPI:
             # Add to RAG pipeline
             self.rag_pipeline.add_vector_store(domain, vector_store)
             
-            # Update task status
+            # Final completion status (domain stays static)
             self.background_tasks[task_id].update({
+                "task_id": task_id,
                 "status": "completed",
+                "message": f"Successfully generated embeddings for {len(chunks)} chunks",
+                "progress": 100,
                 "end_time": time.time(),
                 "results": {
                     "total_chunks": len(chunks),
@@ -482,7 +730,10 @@ class DocumentCrawlerAPI:
         except Exception as e:
             self.logger.error(f"Embed task {task_id} failed: {e}")
             self.background_tasks[task_id].update({
+                "task_id": task_id,
                 "status": "failed",
+                "message": f"Embedding generation failed: {str(e)}",
+                "progress": 0,
                 "end_time": time.time(),
                 "error": str(e)
             })

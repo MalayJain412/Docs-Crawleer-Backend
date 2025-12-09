@@ -13,6 +13,10 @@ class Settings:
     
     # API Keys
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
+    # Gemini model selection (configurable via environment)
+    # Choose embedding and LLM models from available Gemini model names
+    GEMINI_EMBEDDING_MODEL: str = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
+    GEMINI_LLM_MODEL: str = os.getenv("GEMINI_LLM_MODEL", "models/gemini-2.5-flash")
     
     # Crawler Settings
     MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "10"))
