@@ -67,6 +67,51 @@ class DocumentCrawlerAPI:
         
         self._setup_middleware()
         self._setup_routes()
+    
+    async def initialize_services(self):
+        """Initialize services on startup."""
+        try:
+            await self.rag_pipeline.initialize()
+            
+            # Load existing vector stores
+            await self._load_existing_domains()
+            
+            self.logger.info("API services initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize API services: {e}")
+            raise
+    
+    async def cleanup_services(self):
+        """Clean up resources on shutdown."""
+        try:
+            # Close any open resources
+            self.logger.info("API services cleaned up successfully")
+        except Exception as e:
+            self.logger.error(f"Error during API cleanup: {e}")
+    
+    async def check_readiness(self) -> Dict[str, Any]:
+        """Check if services are ready."""
+        try:
+            # Check if RAG pipeline is initialized
+            rag_ready = self.rag_pipeline._llm_client is not None
+            
+            # Check if embedding service is initialized
+            embedding_ready = hasattr(self.rag_pipeline, '_embedding_service') and \
+                            self.rag_pipeline._embedding_service._current_model is not None
+            
+            # Check available domains
+            domains = await self._get_available_domains()
+            
+            return {
+                "rag_pipeline": rag_ready,
+                "embedding_service": embedding_ready,
+                "available_domains": len(domains),
+                "domains": domains
+            }
+        except Exception as e:
+            self.logger.error(f"Readiness check failed: {e}")
+            return {"error": str(e)}
         
     def _setup_middleware(self):
         """Setup CORS middleware."""
@@ -80,21 +125,6 @@ class DocumentCrawlerAPI:
         
     def _setup_routes(self):
         """Setup API routes."""
-        
-        @self.app.on_event("startup")
-        async def startup_event():
-            """Initialize services on startup."""
-            try:
-                await self.rag_pipeline.initialize()
-                
-                # Load existing vector stores
-                await self._load_existing_domains()
-                
-                self.logger.info("API initialized successfully")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to initialize API: {e}")
-                raise
         
         @self.app.get("/", response_model=HealthResponse)
         async def health_check():

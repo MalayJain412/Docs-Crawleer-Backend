@@ -1,9 +1,20 @@
-"""Embedding service with Gemini primary and sentence-transformers fallback."""
+"""Embedding service with Jina primary and fallback options."""
 
 import asyncio
 from typing import List, Optional, Dict, Any, Tuple
 import time
 import re
+
+from .adapter_base import EmbeddingAdapter
+from .jina_adapter import JinaEmbeddingAdapter
+from .azure_adapter import AzureEmbeddingAdapter
+from .gemini_adapter import GeminiEmbeddingAdapter
+from .sentence_transformer_adapter import SentenceTransformerAdapter
+
+try:
+    from langchain_openai import AzureOpenAIEmbeddings
+except ImportError:
+    AzureOpenAIEmbeddings = None
 
 try:
     from config.settings import settings
@@ -28,32 +39,59 @@ class EmbeddingService:
     def __init__(self):
         """Initialize the embedding service."""
         self.logger = default_logger
-        self._gemini_model = None
-        self._sentence_transformer = None
-        self._current_model = None
+        self._current_adapter: Optional[EmbeddingAdapter] = None
+        self._adapters: Dict[str, EmbeddingAdapter] = {}
         
     async def initialize(self):
-        """Initialize embedding models."""
+        """Initialize embedding adapters."""
         try:
-            # Try to initialize sentence-transformers first (primary)
-            self._sentence_transformer = await self._init_sentence_transformer()
-            if self._sentence_transformer:
-                self._current_model = "sentence-transformer"
-                self.logger.info("Initialized sentence-transformers embeddings (primary)")
+            # Try Jina first (primary)
+            jina_adapter = JinaEmbeddingAdapter()
+            if await jina_adapter.initialize():
+                self._adapters["jina"] = jina_adapter
+                self._current_adapter = jina_adapter
+                self.logger.info("Initialized Jina embeddings (primary)")
                 return
             
-            # Fallback to Gemini if sentence-transformers fails
-            if settings.GEMINI_API_KEY:
-                self._gemini_model = await self._init_gemini()
-                if self._gemini_model:
-                    self._current_model = "gemini"
+            # Fallback based on MODEL_USE
+            if settings.MODEL_USE == "azure":
+                # Try Azure OpenAI
+                azure_adapter = await self._init_azure_adapter()
+                if azure_adapter:
+                    self._adapters["azure"] = azure_adapter
+                    self._current_adapter = azure_adapter
+                    self.logger.info("Initialized Azure OpenAI embeddings (fallback)")
+                    return
+                
+                # Fallback to Gemini
+                gemini_adapter = await self._init_gemini_adapter()
+                if gemini_adapter:
+                    self._adapters["gemini"] = gemini_adapter
+                    self._current_adapter = gemini_adapter
                     self.logger.info("Initialized Gemini embeddings (fallback)")
                     return
             
-            raise Exception("No embedding model could be initialized")
+            elif settings.MODEL_USE == "gemini":
+                # Try Gemini first
+                gemini_adapter = await self._init_gemini_adapter()
+                if gemini_adapter:
+                    self._adapters["gemini"] = gemini_adapter
+                    self._current_adapter = gemini_adapter
+                    self.logger.info("Initialized Gemini embeddings (fallback)")
+                    return
+            
+            # Final fallback: sentence-transformers
+            st_adapter = await self._init_sentence_transformer_adapter()
+            if st_adapter:
+                self._adapters["sentence-transformer"] = st_adapter
+                self._current_adapter = st_adapter
+                self.logger.info("Initialized sentence-transformers embeddings (final fallback)")
+                return
+            
+            raise Exception("No embedding adapter could be initialized")
             
         except Exception as e:
-            self.logger.error(f"Failed to initialize embedding models: {e}")
+            self.logger.error(f"Failed to initialize embedding adapters: {e}")
             raise
     
     async def _init_gemini(self) -> Optional[Any]:
@@ -89,7 +127,83 @@ class EmbeddingService:
             self.logger.warning(f"Failed to initialize Gemini: {e}")
             return None
     
-    async def _init_sentence_transformer(self) -> Optional[Any]:
+    async def _init_azure_adapter(self) -> Optional[EmbeddingAdapter]:
+        """Initialize Azure OpenAI embedding adapter."""
+        try:
+            if not AzureOpenAIEmbeddings:
+                self.logger.warning("langchain-openai not installed, skipping Azure OpenAI")
+                return None
+            
+            if not all([
+                settings.AZURE_OPENAI_ENDPOINT,
+                settings.AZURE_OPENAI_API_KEY,
+                settings.AZURE_API_VERSION
+            ]):
+                self.logger.warning("Azure OpenAI settings incomplete, skipping Azure OpenAI")
+                return None
+            
+            embeddings = AzureOpenAIEmbeddings(
+                azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+                api_key=settings.AZURE_OPENAI_API_KEY,
+                api_version=settings.AZURE_API_VERSION,
+                azure_deployment=settings.AZURE_EMBEDDING_DEPLOYMENT,
+                model="text-embedding-ada-002"
+            )
+            
+            # Test
+            test_result = await embeddings.aembed_query("Test sentence")
+            if test_result and len(test_result) > 0:
+                return AzureEmbeddingAdapter(embeddings)
+            
+            return None
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize Azure OpenAI embeddings: {e}")
+            return None
+    
+    async def _init_gemini_adapter(self) -> Optional[EmbeddingAdapter]:
+        """Initialize Gemini embedding adapter."""
+        try:
+            import google.generativeai as genai
+            
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            
+            # Test
+            test_result = genai.embed_content(
+                model=settings.GEMINI_EMBEDDING_MODEL,
+                content="Test",
+                task_type="retrieval_document"
+            )
+            if isinstance(test_result, dict) and 'embedding' in test_result:
+                return GeminiEmbeddingAdapter()
+            
+            return None
+            
+        except ImportError:
+            self.logger.warning("google-generativeai not installed, skipping Gemini")
+            return None
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize Gemini: {e}")
+            return None
+    
+    async def _init_sentence_transformer_adapter(self) -> Optional[EmbeddingAdapter]:
+        """Initialize sentence-transformer adapter."""
+        try:
+            from sentence_transformers import SentenceTransformer
+            
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+            test_embedding = model.encode("Test sentence")
+            if test_embedding is not None and len(test_embedding) > 0:
+                return SentenceTransformerAdapter(model)
+            
+            return None
+            
+        except ImportError:
+            self.logger.warning("sentence-transformers not installed")
+            return None
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize sentence-transformers: {e}")
+            return None
         """Initialize sentence-transformer model."""
         try:
             from sentence_transformers import SentenceTransformer
@@ -113,7 +227,7 @@ class EmbeddingService:
     
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings for a list of texts.
+        Generate embeddings for a list of texts using current adapter.
         
         Args:
             texts: List of text strings
@@ -124,78 +238,55 @@ class EmbeddingService:
         if not texts:
             return []
         
-        if self._current_model == "gemini":
-            return await self._generate_gemini_embeddings(texts)
-        elif self._current_model == "sentence-transformer":
-            return await self._generate_st_embeddings(texts)
-        else:
-            raise Exception("No embedding model available")
-    
-    async def _generate_gemini_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Gemini."""
+        if not self._current_adapter:
+            raise Exception("No embedding adapter initialized")
+        
         try:
-            import google.generativeai as genai
-            
-            embeddings = []
-            
-            # Gemini has rate limits, so process in smaller batches
-            batch_size = 5
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
-                batch_embeddings = []
-                
-                for text in batch:
+            return await self._current_adapter.embed_texts(texts)
+        except Exception as e:
+            self.logger.error(f"Failed to generate embeddings with current adapter: {e}")
+            # Try fallback adapters
+            for adapter_name, adapter in self._adapters.items():
+                if adapter != self._current_adapter:
                     try:
-                        # Use text embedding model
-                        result = genai.embed_content(
-                            model=settings.GEMINI_EMBEDDING_MODEL,
-                            content=text,
-                            task_type="retrieval_document"
-                        )
-                        
-                        if 'embedding' in result:
-                            batch_embeddings.append(result['embedding'])
-                        else:
-                            # Fallback: create zero vector
-                            batch_embeddings.append([0.0] * settings.VECTOR_DIMENSION)
-                        
-                        # Rate limiting
-                        await asyncio.sleep(0.1)
-                        
-                    except Exception as e:
-                        self.logger.warning(f"Failed to embed text with Gemini: {e}")
-                        batch_embeddings.append([0.0] * settings.VECTOR_DIMENSION)
-                
-                embeddings.extend(batch_embeddings)
-                
-                # Delay between batches
-                if i + batch_size < len(texts):
-                    await asyncio.sleep(1)
+                        self.logger.info(f"Trying fallback adapter: {adapter_name}")
+                        self._current_adapter = adapter
+                        return await adapter.embed_texts(texts)
+                    except Exception as fallback_e:
+                        self.logger.warning(f"Fallback adapter {adapter_name} failed: {fallback_e}")
+                        continue
             
-            return embeddings
-            
-        except Exception as e:
-            self.logger.error(f"Gemini embedding failed: {e}")
-            # Try fallback
-            return await self._generate_st_embeddings(texts)
+            raise Exception("All embedding adapters failed")
     
-    async def _generate_st_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using sentence-transformers."""
+    async def embed_query(self, text: str) -> List[float]:
+        """
+        Generate embedding for a single query text.
+        
+        Args:
+            text: Query text
+            
+        Returns:
+            Embedding vector
+        """
+        if not self._current_adapter:
+            raise Exception("No embedding adapter initialized")
+        
         try:
-            # Run in thread to avoid blocking
-            loop = asyncio.get_event_loop()
-            embeddings = await loop.run_in_executor(
-                None, 
-                self._sentence_transformer.encode, 
-                texts
-            )
-            
-            # Convert numpy arrays to lists
-            return [embedding.tolist() for embedding in embeddings]
-            
+            return await self._current_adapter.embed_query(text)
         except Exception as e:
-            self.logger.error(f"Sentence-transformer embedding failed: {e}")
-            raise
+            self.logger.error(f"Failed to embed query with current adapter: {e}")
+            # Try fallback adapters
+            for adapter_name, adapter in self._adapters.items():
+                if adapter != self._current_adapter:
+                    try:
+                        self.logger.info(f"Trying fallback adapter for query: {adapter_name}")
+                        self._current_adapter = adapter
+                        return await adapter.embed_query(text)
+                    except Exception as fallback_e:
+                        self.logger.warning(f"Fallback adapter {adapter_name} failed for query: {fallback_e}")
+                        continue
+            
+            raise Exception("All embedding adapters failed for query")
     
     def chunk_document(self, document: DocumentContent) -> List[ContentChunk]:
         """
@@ -392,21 +483,20 @@ class EmbeddingService:
             raise
     
     def get_embedding_dimension(self) -> int:
-        """Get the dimension of embeddings from current model."""
-        if self._current_model == "gemini":
-            return 768  # Gemini embedding dimension
-        elif self._current_model == "sentence-transformer":
-            return 384  # all-MiniLM-L6-v2 dimension
-        else:
-            return settings.VECTOR_DIMENSION
+        """Get the dimension of embeddings from current adapter."""
+        if self._current_adapter:
+            return self._current_adapter.get_dimension()
+        return settings.VECTOR_DIMENSION
     
     def get_model_info(self) -> Dict[str, Any]:
-        """Get information about current embedding model."""
+        """Get information about current embedding adapter."""
+        if self._current_adapter:
+            info = self._current_adapter.get_info()
+            info['available_adapters'] = list(self._adapters.keys())
+            return info
         return {
-            'model_type': self._current_model,
-            'dimension': self.get_embedding_dimension(),
-            'available_models': {
-                'gemini': self._gemini_model is not None,
-                'sentence_transformer': self._sentence_transformer is not None
-            }
+            'type': 'none',
+            'dimension': settings.VECTOR_DIMENSION,
+            'available_adapters': list(self._adapters.keys()),
+            'initialized': False
         }

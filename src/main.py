@@ -1,8 +1,6 @@
 """Main entry point for the AI-Powered Documentation Crawler & Q/A System."""
 
 import asyncio
-from sympy import false, true
-import uvicorn
 from pathlib import Path
 import sys
 import os
@@ -32,7 +30,58 @@ def create_app():
     try:
         from api.endpoints import DocumentCrawlerAPI
         api_instance = DocumentCrawlerAPI()
-        return api_instance.get_app()
+        app = api_instance.get_app()
+        
+        # Add startup and shutdown events
+        @app.on_event("startup")
+        async def startup_event():
+            """Initialize services on startup."""
+            logger = setup_logger("startup", settings.LOG_LEVEL)
+            logger.info("Application startup: initializing services")
+            # Initialize embedding service and other async resources
+            try:
+                await api_instance.initialize_services()
+                logger.info("Services initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize services: {e}")
+                raise
+        
+        @app.on_event("shutdown")
+        async def shutdown_event():
+            """Clean up resources on shutdown."""
+            logger = setup_logger("shutdown", settings.LOG_LEVEL)
+            logger.info("Application shutdown: cleaning up resources")
+            try:
+                await api_instance.cleanup_services()
+                logger.info("Resources cleaned up successfully")
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
+        
+        # Add health endpoints
+        @app.get("/health")
+        async def health_check():
+            """Basic health check endpoint."""
+            return {"status": "healthy", "service": "documentation-crawler"}
+        
+        @app.get("/ready")
+        async def readiness_check():
+            """Readiness check endpoint."""
+            try:
+                # Check if services are ready
+                ready_status = await api_instance.check_readiness()
+                return {
+                    "status": "ready" if ready_status else "not ready",
+                    "service": "documentation-crawler",
+                    "details": ready_status
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "service": "documentation-crawler",
+                    "error": str(e)
+                }
+        
+        return app
     except ImportError as e:
         print(f"Failed to import FastAPI app: {e}")
         sys.exit(1)
@@ -55,7 +104,7 @@ def main():
             "main:app",
             host=settings.API_HOST,
             port=settings.API_PORT,
-            reload=false,
+            reload=True,
             log_level=settings.LOG_LEVEL.lower()
         )
     else:

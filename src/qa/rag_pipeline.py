@@ -23,10 +23,17 @@ except ImportError:
     from embeddings.embedding_service import EmbeddingService
     from embeddings.vector_store import VectorStore
     from embeddings.multi_domain_vector_store import MultiDomainVectorStore, DomainSearchResult
+from embeddings.adapter_base import LLMAdapter
+from embeddings.gemini_llm_adapter import GeminiLLMAdapter
+from embeddings.azure_llm_adapter import AzureLLMAdapter
+
+try:
+    from langchain_openai import AzureChatOpenAI
+except ImportError:
+    AzureChatOpenAI = None
 
 
 class RAGPipeline:
-    """RAG pipeline for answering queries using retrieved document chunks."""
     
     def __init__(self):
         """Initialize the RAG pipeline."""
@@ -34,7 +41,7 @@ class RAGPipeline:
         self.embedding_service = EmbeddingService()
         self.vector_stores: Dict[str, VectorStore] = {}
         self.multi_domain_store = MultiDomainVectorStore(max_concurrent_domains=5)
-        self._llm_client = None
+        self._llm_adapter: Optional[LLMAdapter] = None
         
     async def initialize(self):
         """Initialize the RAG pipeline components."""
@@ -42,8 +49,8 @@ class RAGPipeline:
             # Initialize embedding service
             await self.embedding_service.initialize()
             
-            # Initialize LLM client
-            self._llm_client = await self._init_llm_client()
+            # Initialize LLM adapter based on MODEL_USE
+            self._llm_adapter = await self._init_llm_adapter()
             
             # Initialize multi-domain store semaphore (ensure it's created in correct event loop)
             self.multi_domain_store = MultiDomainVectorStore(max_concurrent_domains=5)
@@ -54,27 +61,81 @@ class RAGPipeline:
             self.logger.error(f"Failed to initialize RAG pipeline: {e}")
             raise
     
-    async def _init_llm_client(self) -> Optional[Any]:
-        """Initialize LLM client (Gemini or fallback)."""
-        try:
-            if settings.GEMINI_API_KEY:
-                import google.generativeai as genai
-                genai.configure(api_key=settings.GEMINI_API_KEY)
-                
-                # Test the model with Gemini Flash
-                model = genai.GenerativeModel(settings.GEMINI_LLM_MODEL)
-                test_response = model.generate_content("Hello")
-                
-                self.logger.info("Initialized Gemini LLM client")
-                return genai
-            else:
-                self.logger.warning("No LLM API key provided, running in embedding-only mode")
-                return None
-                
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize LLM client: {e}")
-            self.logger.info("Running in embedding-only mode (no LLM available)")
-            return None
+    async def _init_llm_adapter(self) -> Optional[LLMAdapter]:
+        """Initialize LLM adapter based on MODEL_USE setting."""
+        if settings.MODEL_USE == "azure":
+            # Try Azure OpenAI first
+            try:
+                if (settings.AZURE_OPENAI_ENDPOINT and 
+                    settings.AZURE_OPENAI_API_KEY and 
+                    settings.AZURE_API_VERSION):
+                    
+                    if not AzureChatOpenAI:
+                        self.logger.warning("langchain-openai not installed, cannot use Azure")
+                    else:
+                        llm = AzureChatOpenAI(
+                            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+                            api_key=settings.AZURE_OPENAI_API_KEY,
+                            api_version=settings.AZURE_API_VERSION,
+                            azure_deployment=settings.AZURE_LLM_DEPLOYMENT,
+                            model="gpt-3.5-turbo",
+                            temperature=0.1
+                        )
+                        
+                        # Test
+                        test_response = await llm.ainvoke("Hello")
+                        if test_response:
+                            adapter = AzureLLMAdapter(llm)
+                            self.logger.info("Initialized Azure OpenAI LLM adapter")
+                            return adapter
+            except Exception as e:
+                self.logger.warning(f"Azure OpenAI LLM initialization failed: {e}")
+            
+            # Fallback to Gemini
+            try:
+                gemini_adapter = GeminiLLMAdapter()
+                if await gemini_adapter.initialize():
+                    self.logger.info("Initialized Gemini LLM adapter (fallback)")
+                    return gemini_adapter
+            except Exception as e:
+                self.logger.warning(f"Gemini LLM fallback failed: {e}")
+        
+        elif settings.MODEL_USE == "gemini":
+            # Try Gemini first
+            try:
+                gemini_adapter = GeminiLLMAdapter()
+                if await gemini_adapter.initialize():
+                    self.logger.info("Initialized Gemini LLM adapter")
+                    return gemini_adapter
+            except Exception as e:
+                self.logger.warning(f"Gemini LLM initialization failed: {e}")
+            
+            # Fallback to Azure if available
+            try:
+                if (settings.AZURE_OPENAI_ENDPOINT and 
+                    settings.AZURE_OPENAI_API_KEY and 
+                    settings.AZURE_API_VERSION and
+                    AzureChatOpenAI):
+                    
+                    llm = AzureChatOpenAI(
+                        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+                        api_key=settings.AZURE_OPENAI_API_KEY,
+                        api_version=settings.AZURE_API_VERSION,
+                        azure_deployment=settings.AZURE_LLM_DEPLOYMENT,
+                        model="gpt-3.5-turbo",
+                        temperature=0.1
+                    )
+                    
+                    test_response = await llm.ainvoke("Hello")
+                    if test_response:
+                        adapter = AzureLLMAdapter(llm)
+                        self.logger.info("Initialized Azure OpenAI LLM adapter (fallback)")
+                        return adapter
+            except Exception as e:
+                self.logger.warning(f"Azure OpenAI LLM fallback failed: {e}")
+        
+        self.logger.warning("No LLM adapter could be initialized")
+        return None
     
     def add_vector_store(self, domain: str, vector_store: VectorStore):
         """
@@ -151,7 +212,7 @@ class RAGPipeline:
                 )
             
             # Generate answer using LLM
-            if self._llm_client and request.include_context:
+            if self._llm_adapter and request.include_context:
                 answer = await self._generate_llm_answer(request.query, search_results)
                 confidence = self._calculate_confidence(search_results)
             else:
@@ -292,20 +353,27 @@ Query:
 **Comprehensive Technical Answer:**
 """
             
-            # Generate response with Gemini Flash - configured for comprehensive responses
-            model = genai.GenerativeModel(
-                settings.GEMINI_LLM_MODEL,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=settings.LLM_TEMPERATURE,
-                    max_output_tokens=settings.LLM_MAX_TOKENS,
-                    top_p=0.8,
-                    top_k=40
+            # Generate response using LLM adapter
+            if self._llm_adapter.get_info()['type'] == 'gemini':
+                # Use Gemini-specific configuration
+                import google.generativeai as genai
+                model = genai.GenerativeModel(
+                    settings.GEMINI_LLM_MODEL,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=settings.LLM_TEMPERATURE,
+                        max_output_tokens=settings.LLM_MAX_TOKENS,
+                        top_p=0.8,
+                        top_k=40
+                    )
                 )
-            )
-            response = model.generate_content(prompt)
+                response = model.generate_content(prompt)
+                answer = response.text if hasattr(response, 'text') else str(response)
+            else:
+                # Use adapter for other LLM types
+                answer = await self._llm_adapter.generate(prompt)
             
-            if response.text:
-                return response.text.strip()
+            if answer:
+                return answer.strip()
             else:
                 return self._create_fallback_answer(search_results)
                 
