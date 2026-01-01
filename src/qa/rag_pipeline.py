@@ -148,6 +148,19 @@ class RAGPipeline:
         self.vector_stores[domain] = vector_store
         self.logger.info(f"Added vector store for domain: {domain}")
     
+    def remove_vector_store(self, domain: str):
+        """
+        Remove a vector store for a domain.
+        
+        Args:
+            domain: Domain name
+        """
+        if domain in self.vector_stores:
+            del self.vector_stores[domain]
+            self.logger.info(f"Removed vector store for domain: {domain}")
+        else:
+            self.logger.warning(f"No vector store found for domain: {domain}")
+    
     def load_vector_store(self, domain: str, domain_folder: str) -> bool:
         """
         Load vector store for a domain.
