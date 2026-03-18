@@ -173,6 +173,29 @@ dfrontend/build/
 package-lock.json
 yarn.lock
 
+# Development and documentation (keep locally, exclude from deployment)
+tests/
+docs/
+dfrontend/
+copy_utils.py
+.github/
+
+# Documentation files (keep only README.md)
+*.md
+!README.md
+
+# PM2 logs and process files
+logs/
+*.log
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# PM2 ecosystem file
+ecosystem.config.js
+pm2.json
+
 copy_utils.py
 dfrontend/
 all_code_snippets.txt

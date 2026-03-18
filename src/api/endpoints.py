@@ -5,46 +5,25 @@ import time
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-try:
-    from config.settings import settings
-    from utils.logger import default_logger
-    from utils.url_utils import URLUtils
-    from storage.storage_manager import StorageManager
-    from storage.schemas import CrawlSession, DocumentContent, EmbeddingIndex
-    from crawler.web_crawler import WebCrawler
-    from embeddings.embedding_service import EmbeddingService
-    from embeddings.vector_store import VectorStore
-    from qa.rag_pipeline import RAGPipeline
-    from api.models import (
-        CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
-        QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
-        HealthResponse, ErrorResponse, DomainsValidationRequest,
-        DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
-    )
-except ImportError:
-    # Fallback for direct execution
-    import sys
-    sys.path.append(str(Path(__file__).parent.parent))
-    
-    from config.settings import settings
-    from utils.logger import default_logger
-    from utils.url_utils import URLUtils
-    from storage.storage_manager import StorageManager
-    from storage.schemas import CrawlSession, DocumentContent, EmbeddingIndex
-    from crawler.web_crawler import WebCrawler
-    from embeddings.embedding_service import EmbeddingService
-    from embeddings.vector_store import VectorStore
-    from qa.rag_pipeline import RAGPipeline
-    from api.models import (
-        CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
-        QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
-        HealthResponse, ErrorResponse, DomainsValidationRequest,
-        DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
-    )
+from config.settings import settings
+from utils.logger import default_logger
+from utils.url_utils import URLUtils
+from storage.storage_manager import StorageManager
+from storage.schemas import CrawlSession, DocumentContent, EmbeddingIndex
+from crawler.web_crawler import WebCrawler
+from embeddings.embedding_service import EmbeddingService
+from embeddings.vector_store import VectorStore
+from qa.rag_pipeline import RAGPipeline
+from api.models import (
+    CrawlRequest, CrawlResponse, EmbedRequest, EmbedResponse,
+    QueryRequest, MultiDomainQueryRequest, QueryResponse, DomainInfo, StatusResponse,
+    HealthResponse, ErrorResponse, DomainsValidationRequest,
+    DomainsValidationResponse, AvailableDomainsResponse, MultiDomainQueryResponse
+)
 
 
 class DocumentCrawlerAPI:
@@ -67,6 +46,51 @@ class DocumentCrawlerAPI:
         
         self._setup_middleware()
         self._setup_routes()
+    
+    async def initialize_services(self):
+        """Initialize services on startup."""
+        try:
+            await self.rag_pipeline.initialize()
+            
+            # Load existing vector stores
+            await self._load_existing_domains()
+            
+            self.logger.info("API services initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize API services: {e}")
+            raise
+    
+    async def cleanup_services(self):
+        """Clean up resources on shutdown."""
+        try:
+            # Close any open resources
+            self.logger.info("API services cleaned up successfully")
+        except Exception as e:
+            self.logger.error(f"Error during API cleanup: {e}")
+    
+    async def check_readiness(self) -> Dict[str, Any]:
+        """Check if services are ready."""
+        try:
+            # Check if RAG pipeline is initialized
+            rag_ready = self.rag_pipeline._llm_client is not None
+            
+            # Check if embedding service is initialized
+            embedding_ready = hasattr(self.rag_pipeline, '_embedding_service') and \
+                            self.rag_pipeline._embedding_service._current_model is not None
+            
+            # Check available domains
+            domains = await self._get_available_domains()
+            
+            return {
+                "rag_pipeline": rag_ready,
+                "embedding_service": embedding_ready,
+                "available_domains": len(domains),
+                "domains": domains
+            }
+        except Exception as e:
+            self.logger.error(f"Readiness check failed: {e}")
+            return {"error": str(e)}
         
     def _setup_middleware(self):
         """Setup CORS middleware."""
@@ -80,21 +104,6 @@ class DocumentCrawlerAPI:
         
     def _setup_routes(self):
         """Setup API routes."""
-        
-        @self.app.on_event("startup")
-        async def startup_event():
-            """Initialize services on startup."""
-            try:
-                await self.rag_pipeline.initialize()
-                
-                # Load existing vector stores
-                await self._load_existing_domains()
-                
-                self.logger.info("API initialized successfully")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to initialize API: {e}")
-                raise
         
         @self.app.get("/", response_model=HealthResponse)
         async def health_check():
@@ -461,7 +470,7 @@ class DocumentCrawlerAPI:
         
         @self.app.get("/domains/{domain_name}/documents")
         async def get_domain_documents(domain_name: str, format_type: str = "json"):
-            """Get documents for a specific domain."""
+            """Get all documents for a specific domain."""
             try:
                 domains = self.storage_manager.list_domains()
                 domain_info = next((d for d in domains if d['domain_name'] == domain_name), None)
@@ -479,13 +488,142 @@ class DocumentCrawlerAPI:
                     "domain": domain_name,
                     "format": format_type,
                     "total_documents": len(documents),
-                    "documents": [doc.dict() for doc in documents]
+                    "documents": [doc.dict() for doc in documents]  # Return all documents
                 }
                 
             except HTTPException:
                 raise
             except Exception as e:
                 self.logger.error(f"Get documents failed: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.app.delete("/domains/{domain_name}/embeddings")
+        async def delete_domain_embeddings(domain_name: str):
+            """Delete embeddings (FAISS index) for a specific domain."""
+            try:
+                # Check if domain exists
+                domains = self.storage_manager.list_domains()
+                domain_info = next((d for d in domains if d['domain_name'] == domain_name), None)
+                if not domain_info:
+                    raise HTTPException(status_code=404, detail=f"Domain '{domain_name}' not found")
+                
+                # Check if embeddings exist
+                if domain_name not in self.rag_pipeline.get_available_domains():
+                    raise HTTPException(status_code=404, detail=f"No embeddings found for domain '{domain_name}'")
+                
+                # Delete the vector store
+                self.rag_pipeline.remove_vector_store(domain_name)
+                
+                # Delete FAISS files
+                domain_folder = domain_info['domain_folder']
+                vector_store = VectorStore(domain_name, domain_folder)
+                vector_store.delete_index()
+                
+                return {
+                    "success": True,
+                    "message": f"Embeddings deleted for domain '{domain_name}'",
+                    "domain": domain_name
+                }
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                self.logger.error(f"Failed to delete embeddings for {domain_name}: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/domains/{domain_name}/reembed")
+        async def reembed_domain(domain_name: str, background_tasks: BackgroundTasks):
+            """Re-embed a domain (delete existing embeddings and regenerate)."""
+            try:
+                # Check if domain exists
+                domains = self.storage_manager.list_domains()
+                domain_info = next((d for d in domains if d['domain_name'] == domain_name), None)
+                if not domain_info:
+                    raise HTTPException(status_code=404, detail=f"Domain '{domain_name}' not found")
+                
+                domain_folder = domain_info['domain_folder']
+                
+                # Generate unique task ID
+                task_id = f"reembed_{domain_name.replace('.', '-').replace('_', '-').lower()}_{int(time.time() * 1000)}"
+                
+                # Initialize task
+                self.background_tasks[task_id] = {
+                    "task_id": task_id,
+                    "status": "started",
+                    "message": f"Starting re-embedding for {domain_name}",
+                    "progress": 0,
+                    "domain": domain_name,
+                    "start_time": time.time(),
+                    "end_time": None,
+                    "error": None
+                }
+                
+                # Start re-embedding in background
+                background_tasks.add_task(
+                    self._reembed_task,
+                    task_id,
+                    domain_name,
+                    domain_folder
+                )
+                
+                return {
+                    "success": True,
+                    "message": f"Re-embedding started for domain '{domain_name}'",
+                    "task_id": task_id
+                }
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                self.logger.error(f"Failed to start re-embedding for {domain_name}: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/domains/{domain_name}")
+        async def delete_domain(domain_name: str, background_tasks: BackgroundTasks, delete_blob: bool = False):
+            """Delete an entire domain (documents, embeddings, etc.)."""
+            try:
+                # Check if domain exists
+                domains = self.storage_manager.list_domains()
+                domain_info = next((d for d in domains if d['domain_name'] == domain_name), None)
+                if not domain_info:
+                    raise HTTPException(status_code=404, detail=f"Domain '{domain_name}' not found")
+                
+                domain_folder = domain_info['domain_folder']
+                
+                # Generate unique task ID
+                task_id = f"delete_domain_{domain_name.replace('.', '-').replace('_', '-').lower()}_{int(time.time() * 1000)}"
+                
+                # Initialize task
+                self.background_tasks[task_id] = {
+                    "task_id": task_id,
+                    "status": "started",
+                    "message": f"Starting domain deletion for {domain_name}",
+                    "progress": 0,
+                    "domain": domain_name,
+                    "start_time": time.time(),
+                    "end_time": None,
+                    "error": None
+                }
+                
+                # Start deletion in background
+                background_tasks.add_task(
+                    self._delete_domain_task,
+                    task_id,
+                    domain_name,
+                    domain_folder,
+                    delete_blob
+                )
+                
+                return {
+                    "success": True,
+                    "message": f"Domain deletion started for '{domain_name}'",
+                    "task_id": task_id
+                }
+                
+            except HTTPException:
+                raise
+            except Exception as e:
+                self.logger.error(f"Failed to start domain deletion for {domain_name}: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.get("/tasks/{task_id}")
@@ -702,9 +840,11 @@ class DocumentCrawlerAPI:
             
             # Create vector store
             vector_store = VectorStore(domain, domain_folder)
+            model_info = embedding_service.get_model_info()
+            model_name = model_info.get('model', model_info.get('type', 'unknown'))
             embedding_info = vector_store.create_index(
                 chunks, 
-                embedding_service.get_model_info()['model_type']
+                model_name
             )
             
             # Add to RAG pipeline
@@ -733,6 +873,150 @@ class DocumentCrawlerAPI:
                 "task_id": task_id,
                 "status": "failed",
                 "message": f"Embedding generation failed: {str(e)}",
+                "progress": 0,
+                "end_time": time.time(),
+                "error": str(e)
+            })
+    
+    async def _reembed_task(self, task_id: str, domain: str, domain_folder: str):
+        """Background re-embedding task (delete existing and regenerate)."""
+        try:
+            self.logger.info(f"Starting re-embed task {task_id} for domain {domain}")
+            
+            # Update task status
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "processing",
+                "message": f"Deleting existing embeddings for {domain}",
+                "progress": 10
+            })
+            
+            # Delete existing embeddings
+            if domain in self.rag_pipeline.get_available_domains():
+                self.rag_pipeline.remove_vector_store(domain)
+                vector_store = VectorStore(domain, domain_folder)
+                vector_store.delete_index()
+            
+            # Update progress
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "message": f"Regenerating embeddings for {domain}",
+                "progress": 20
+            })
+            
+            # Load documents
+            documents = self.storage_manager.load_documents(domain_folder, "json")
+            if not documents:
+                raise Exception("No documents found for re-embedding")
+            
+            # Initialize embedding service
+            embedding_service = EmbeddingService()
+            await embedding_service.initialize()
+            
+            # Generate embeddings
+            async def embedding_progress_callback(progress_data):
+                stage = progress_data.get('stage', 'processing')
+                if stage == 'chunking':
+                    self.background_tasks[task_id].update({
+                        "task_id": task_id,
+                        "message": f"Chunking documents...",
+                        "progress": 40
+                    })
+                elif stage == 'embedding':
+                    chunks_processed = progress_data.get('chunks_processed', 0)
+                    total_chunks = progress_data.get('total_chunks', 1)
+                    embed_progress = int(50 + (chunks_processed / total_chunks) * 40)
+                    self.background_tasks[task_id].update({
+                        "task_id": task_id,
+                        "message": f"Generating embeddings... ({chunks_processed}/{total_chunks} chunks)",
+                        "progress": embed_progress
+                    })
+            
+            chunks = await embedding_service.embed_documents(documents, embedding_progress_callback)
+            
+            # Create vector store
+            vector_store = VectorStore(domain, domain_folder)
+            model_info = embedding_service.get_model_info()
+            model_name = model_info.get('model', model_info.get('type', 'unknown'))
+            embedding_info = vector_store.create_index(
+                chunks, 
+                model_name
+            )
+            
+            # Add to RAG pipeline
+            self.rag_pipeline.add_vector_store(domain, vector_store)
+            
+            # Completion
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "completed",
+                "message": f"Successfully re-embedded {len(chunks)} chunks for {domain}",
+                "progress": 100,
+                "end_time": time.time(),
+                "results": {
+                    "total_chunks": len(chunks),
+                    "embedding_dimension": embedding_info.vector_dimension,
+                    "model_name": embedding_info.model_name
+                }
+            })
+            
+            self.logger.info(f"Re-embed task {task_id} completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Re-embed task {task_id} failed: {e}")
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "failed",
+                "message": f"Re-embedding failed: {str(e)}",
+                "progress": 0,
+                "end_time": time.time(),
+                "error": str(e)
+            })
+
+    async def _delete_domain_task(self, task_id: str, domain: str, domain_folder: str, delete_blob: bool):
+        """Background domain deletion task."""
+        try:
+            self.logger.info(f"Starting domain deletion task {task_id} for domain {domain}")
+            
+            # Update task status
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "processing",
+                "message": f"Deleting domain data for {domain}",
+                "progress": 50
+            })
+            
+            # Remove from RAG pipeline if exists
+            if domain in self.rag_pipeline.get_available_domains():
+                self.rag_pipeline.remove_vector_store(domain)
+            
+            # Delete domain folder
+            import shutil
+            if Path(domain_folder).exists():
+                shutil.rmtree(domain_folder)
+            
+            # TODO: If delete_blob is True, also delete from Azure Blob Storage (if configured)
+            if delete_blob:
+                # Implement blob deletion logic here if needed
+                pass
+            
+            # Completion
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "completed",
+                "message": f"Successfully deleted domain '{domain}'",
+                "progress": 100,
+                "end_time": time.time()
+            })
+            
+            self.logger.info(f"Domain deletion task {task_id} completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Domain deletion task {task_id} failed: {e}")
+            self.background_tasks[task_id].update({
+                "task_id": task_id,
+                "status": "failed",
+                "message": f"Domain deletion failed: {str(e)}",
                 "progress": 0,
                 "end_time": time.time(),
                 "error": str(e)
