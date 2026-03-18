@@ -59,7 +59,7 @@ jobs:
             if [ "$PM2_EXISTS" = true ]; then
               pm2 restart "$PM2_NAME"
             else
-              pm2 start "$VENV/bin/uvicorn" --name "$PM2_NAME" -- src.main:app --host 0.0.0.0 --port 8001
+              pm2 start python --name "$PM2_NAME" -- src.main:app
             fi
 
             echo ">>> Saving PM2 startup config"
