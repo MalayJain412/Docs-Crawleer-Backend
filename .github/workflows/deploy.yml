@@ -59,7 +59,7 @@ jobs:
             if [ "$PM2_EXISTS" = true ]; then
               pm2 restart "$PM2_NAME"
             else
-              pm2 start python --name "$PM2_NAME" -- src.main:app
+              pm2 start python --name "$PM2_NAME" -- src.main.py
             fi
 
             echo ">>> Saving PM2 startup config"
